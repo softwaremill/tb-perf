@@ -1,6 +1,6 @@
 ---
 name: rust-backend-engineer
-description: Use this agent when implementing backend systems, APIs, services, or infrastructure code in Rust. Examples: 'Design a REST API for user authentication using actix-web', 'Implement a concurrent job queue with tokio', 'Create a database migration system using sqlx', 'Build a WebSocket server for real-time communication', 'Optimize this Rust service for better performance', 'Review this backend code for concurrency issues and error handling'.
+description: "Use this agent when implementing backend systems, APIs, services, or infrastructure code in Rust. Examples: 'Design a REST API for user authentication using actix-web', 'Implement a concurrent job queue with tokio', 'Create a database migration system using sqlx', 'Build a WebSocket server for real-time communication', 'Optimize this Rust service for better performance', 'Review this backend code for concurrency issues and error handling'."
 model: opus
 color: cyan
 ---

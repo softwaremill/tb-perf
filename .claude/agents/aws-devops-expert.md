@@ -1,6 +1,6 @@
 ---
 name: aws-devops-expert
-description: Use this agent when working with AWS infrastructure, provisioning cloud resources, implementing infrastructure-as-code solutions, automating deployment pipelines, troubleshooting AWS services, optimizing cloud architecture, or designing scalable cloud infrastructure. Examples: 'Set up a CloudFormation stack for a three-tier web application', 'Configure an ECS cluster with auto-scaling', 'Debug IAM permission issues in our CI/CD pipeline', 'Design a multi-region disaster recovery solution', 'Optimize our Lambda functions for cost and performance'.
+description: "Use this agent when working with AWS infrastructure, provisioning cloud resources, implementing infrastructure-as-code solutions, automating deployment pipelines, troubleshooting AWS services, optimizing cloud architecture, or designing scalable cloud infrastructure. Examples: 'Set up a CloudFormation stack for a three-tier web application', 'Configure an ECS cluster with auto-scaling', 'Debug IAM permission issues in our CI/CD pipeline', 'Design a multi-region disaster recovery solution', 'Optimize our Lambda functions for cost and performance'."
 model: opus
 color: green
 ---
