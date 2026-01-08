@@ -8,8 +8,12 @@ Build a comprehensive performance comparison framework for TigerBeetle vs Postgr
 - Rust-based benchmarking client for TigerBeetle vs PostgreSQL
 - Double-entry bookkeeping workload with Zipfian distribution
 - Local (Docker) and cloud (AWS 3-node clusters) deployment modes
-- Automated test execution: warmup → ramp-up → measurement phases
+- **Two test modes**:
+  - **max_throughput**: Closed-loop for finding maximum TPS
+  - **fixed_rate**: Open-loop with coordinated omission correction for accurate latency
+- Automated test execution: warmup → measurement phases (no ramp-up)
 - Multiple runs with automatic statistical aggregation (mean, stddev, CV, confidence intervals)
+- **Fair comparison**: Equivalent durability/replication (3-node, quorum=2) for both systems
 - Full observability: OpenTelemetry + Grafana + JSON/CSV exports
 - Zero manual intervention during test execution
 
@@ -63,20 +67,32 @@ Initialize a Rust workspace with the following structure:
 ### 1.2 Configuration Options
 
 **Client Configuration** (workload behavior):
+- `test_mode` - "max_throughput" or "fixed_rate" (controls workload generation strategy)
 - `num_accounts` - Total number of accounts (default: 100,000)
-- `concurrency` - Concurrent workers per client node (default: 10, based on 2x vCPU count for c5.large)
 - `zipfian_exponent` - Account selection skew (0 = uniform, ~1.5 = high skew)
 - `initial_balance` - Starting balance per account (default: 1,000,000)
 - `min_transfer_amount` - Minimum transfer (default: 1)
 - `max_transfer_amount` - Maximum transfer (default: 1,000)
-- `think_time_ms` - Delay between requests per worker (default: 0, for max throughput testing)
 - `warmup_duration_secs` - Warmup period before metrics collection (default: 120)
-- `rampup_duration_secs` - Linear ramp-up to target concurrency (default: 60)
-- `test_duration_secs` - Test duration excluding warmup/rampup (default: 300)
+- `test_duration_secs` - Measurement phase duration (default: 300)
 - `database` - TigerBeetle or PostgreSQL
 - `test_runs` - Number of test runs per configuration (default: 3)
 - `max_variance_threshold` - Maximum acceptable variance between runs (default: 0.10 = 10%)
 - `max_error_rate` - Maximum error rate for valid test (default: 0.05 = 5%)
+
+**Test Mode: max_throughput**:
+- `concurrency` - Concurrent workers per client node (default: 10, based on 2x vCPU count)
+- Closed-loop: each worker continuously sends requests (no pauses)
+- Measures maximum system throughput and service time under backpressure
+- Latencies represent "closed-loop service time" (will underreport tails vs open-loop)
+
+**Test Mode: fixed_rate**:
+- `target_rate` - Target requests per second (e.g., 1000, 5000, 10000)
+- `max_concurrency` - Maximum concurrent workers (safety limit, default: 1000)
+- Open-loop: requests issued at constant rate regardless of completion time
+- Enables coordinated omission correction via HdrHistogram `record_correct()`
+- Tests system behavior under realistic arrival patterns
+- Use this mode to measure latency under various load levels (e.g., 50%, 75%, 90% of max throughput)
 
 **PostgreSQL-Specific Configuration**:
 - `isolation_level` - READ_COMMITTED | REPEATABLE_READ | SERIALIZABLE
@@ -87,10 +103,9 @@ Initialize a Rust workspace with the following structure:
 - `auto_vacuum` - Enable/disable auto-vacuum during tests (default: disabled for consistent results)
 
 **TigerBeetle-Specific Configuration**:
-- `batch_size` - Explicit batch size for transfers (default: auto, max: 8189)
-- `use_single_batcher` - Use single-batcher architecture to maximize batch efficiency (default: false)
 - `replication_quorum` - Replication quorum for 3-node cluster (default: 2)
 - `measure_batch_sizes` - Record actual batch sizes during test (default: true)
+- Note: Uses default TigerBeetle client batching behavior (no custom batch size configuration)
 
 **Cloud Infrastructure Configuration**:
 - `num_db_nodes` - Database cluster size (1 for local, 3 for cloud)
@@ -132,24 +147,32 @@ Initialize a Rust workspace with the following structure:
 - Zipfian distribution for account selection (hot accounts get more traffic)
 - Random transfer amounts within configured range (default: 1-1,000)
 - Initial account balance: 1,000,000 (minimizes insufficient balance scenarios)
-- **Think time**: Zero by default (continuous load for max throughput testing)
 - **Test Phases**:
-  1. **Warmup Phase** (default: 120s): Run workload to fill buffer pools, caches, complete JIT compilation
-  2. **Ramp-up Phase** (default: 60s): Linear increase from 0 to target concurrency
-  3. **Measurement Phase** (default: 300s): Stable load at target concurrency, metrics collected
+  1. **Warmup Phase** (default: 120s): Run workload at full target load to:
+     - Fill database buffer pools and caches
+     - Complete JIT compilation (if applicable)
+     - Stabilize connection pools
+     - Metrics collected but discarded (tagged with `phase="warmup"`)
+  2. **Measurement Phase** (default: 300s): Continue at full target load, metrics collected and exported
 - No retry logic for insufficient balance (count as successful rejection, not an error)
 - Retry logic for serialization failures (with exponential backoff)
-- **Latency Recording**: Use HdrHistogram
-  - For max-throughput workload (zero think time), coordinated omission correction not applicable
-  - Record actual observed latencies with `record(value)`
-  - If adding configurable think time, use `record_correct(value, think_time_ms)` for correction
+- **Latency Recording**: Use HdrHistogram with proper configuration
+  - Initialization: `Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)` (1μs to 60s, 3 significant figures)
+  - **max_throughput mode**: Record actual observed latencies with `record(value)`
+    - Measures closed-loop service time under backpressure
+    - Note: This will underreport tail latencies compared to open-loop
+  - **fixed_rate mode**: Use `record_correct(value, expected_interval_ns)` for coordinated omission correction
+    - `expected_interval_ns = 1_000_000_000 / target_rate`
+    - Measures open-loop response time under realistic arrival patterns
+  - Multi-client aggregation: Clients export serialized HdrHistogram data (not pre-computed percentiles)
+  - Server-side: Use `histogram.add(&other_histogram)` to merge client histograms
 - OpenTelemetry metrics collection:
   - Successful transfers (completed)
-  - Rejected transfers (insufficient balance)
-  - Failed transfers (errors, serialization failures after max retries)
-  - Latency percentiles (p50, p95, p99, p999) for successful+rejected
+  - Rejected transfers (insufficient balance - business rejection, NOT an error)
+  - Failed transfers (database errors after max retries - serialization failures, connection errors, etc.)
+  - Latency percentiles (p50, p95, p99, p999) for successful+rejected requests
   - Throughput (total requests/sec)
-  - Error rate (%) - test invalid if > 5%
+  - Database error rate (%) - test invalid if > 5%
   - TigerBeetle-specific: actual batch sizes used
   - Client resource utilization (CPU, memory) to detect client saturation
 
@@ -161,9 +184,12 @@ Initialize a Rust workspace with the following structure:
 - Connection pooling (using `deadpool-postgres` with `RecyclingMethod::Verified`)
   - Pool min_idle = max_size for pre-warming (avoids connection overhead during measurement)
 - Call stored procedure with pessimistic locking
-- Handle serialization failures and retry
+- **Error handling**:
+  - Insufficient balance returned by stored procedure: Count as business rejection (NOT an error)
+  - Serialization failures: Retry with exponential backoff, count as error only after max retries
+  - Connection errors: Count as database error immediately
 - Configurable isolation level per connection
-- Run VACUUM before each test (with auto-vacuum disabled during tests)
+- Run explicit CHECKPOINT + VACUUM ANALYZE before each test (with auto-vacuum disabled during tests)
 - Connection pool size: 2x vCPU count as starting point (tune based on workload)
 
 ### 2.4 Observability Stack
@@ -182,7 +208,8 @@ Initialize a Rust workspace with the following structure:
 
 **Grafana**:
 - Pre-configured dashboard with panels:
-  - **Test Phase Indicator**: State timeline panel using `phase` label to show Warmup / Ramp-up / Measurement
+  - **Test Phase Indicator**: State timeline panel using `phase` label to show Warmup / Measurement
+  - **Test Mode Indicator**: Show whether running max_throughput or fixed_rate mode
   - Throughput (total requests/sec) - time series
   - Successful transfers/sec vs Rejected transfers/sec - stacked time series
   - Error rate (%) - time series with alert annotation at 5% threshold
@@ -195,20 +222,25 @@ Initialize a Rust workspace with the following structure:
   - Active connections/clients - gauge
   - TigerBeetle batch sizes (histogram) - time series
   - Client CPU saturation indicator - gauge
+  - For fixed_rate mode: Target rate vs actual achieved rate comparison
 
 **Metrics Export**:
 - JSON export at test completion with summary metrics (measurement phase only):
-  - Test configuration (all parameters)
+  - Test configuration (all parameters including test_mode)
   - Test run number (1-N) and timestamp
-  - Total duration (warmup, ramp-up, measurement phases)
+  - Test duration (warmup, measurement phases)
   - Throughput (requests/sec, successful transfers/sec, rejected/sec)
   - Latency percentiles (p50, p95, p99, p999) from HdrHistogram
+    - For max_throughput: closed-loop service time
+    - For fixed_rate: open-loop response time (coordinated omission corrected)
   - Error count and rate
   - Resource usage averages (CPU, memory, disk I/O, network I/O)
   - Network latency between nodes (mean, p95, p99)
   - TigerBeetle-specific: mean/median batch size
   - Client saturation indicator (max CPU utilization)
+  - For fixed_rate mode: target rate, achieved rate, completion percentage
   - Statistical metadata: standard deviation across runs, coefficient of variation
+  - Software versions: PostgreSQL version, TigerBeetle version, Rust toolchain version
 
 ### 2.5 Automated Test Orchestration
 
@@ -232,31 +264,31 @@ Initialize a Rust workspace with the following structure:
 
    a. **Phase 1: Warmup** (default 120s)
       - Client emits phase marker: `test.phase="warmup"` label via OpenTelemetry
-      - Workload executes at target concurrency
+      - Workload executes at full target load (max_throughput: at target concurrency, fixed_rate: at target rate)
+      - Fills buffer pools, completes JIT compilation, stabilizes connection pools
       - Metrics sent to OTel Collector, stored in Prometheus with `phase="warmup"` label
       - Filtered out during result aggregation
 
-   b. **Phase 2: Ramp-up** (default 60s)
-      - Client emits phase marker: `test.phase="rampup"` via OpenTelemetry
-      - Concurrency increases linearly from 0 to target (e.g., 0→10 over 60s)
-      - Metrics tagged with `phase="rampup"`, filtered out during result aggregation
-
-   c. **Phase 3: Measurement** (default 300s)
+   b. **Phase 2: Measurement** (default 300s)
       - Client emits phase marker: `test.phase="measurement"` via OpenTelemetry
-      - Workload runs at stable target concurrency
+      - Workload continues at full target load
       - **Metrics tagged as `phase="measurement"`** (ONLY these are used for results)
-      - HdrHistogram records latencies with coordinated omission correction
+      - HdrHistogram records latencies:
+        - max_throughput mode: `record(value)` for closed-loop service time
+        - fixed_rate mode: `record_correct(value, expected_interval)` for coordinated omission correction
       - All metrics sent via OTLP, timestamped and associated with run_id
 
-   d. **Per-Run Export**:
+   c. **Per-Run Export**:
       - Query Prometheus for metrics with `phase="measurement"` AND `run_id=N`
       - Export to `results/{config_name}/run_{N}_{timestamp}.json` with all metrics from measurement phase
 
-   e. **Database Reset**:
-      - For PostgreSQL: DROP DATABASE + recreate schema + repopulate accounts (ensures clean buffer pool state)
+   d. **Database Reset**:
+      - For PostgreSQL:
+        - DROP DATABASE + recreate schema + repopulate accounts (ensures clean buffer pool state)
+        - Run explicit CHECKPOINT before VACUUM ANALYZE
+        - Run VACUUM ANALYZE after repopulation
       - For TigerBeetle: Truncate transfers, reset account balances
-      - For PostgreSQL: Run VACUUM ANALYZE after repopulation
-      - Wait 30s for system to stabilize (WAL flush, buffer cache, network draining)
+      - Wait 30s for system to stabilize (checkpoint completion, WAL flush, buffer cache, network draining)
 
 3. **Automated Result Aggregation**:
 
@@ -284,15 +316,33 @@ Initialize a Rust workspace with the following structure:
    - Optionally keep Grafana running for manual analysis
    - Cleanup containers OR preserve infrastructure for next test
 
-**Key Design Principle**: Client emits phase labels (`warmup`, `rampup`, `measurement`) with all metrics. Only `phase="measurement"` metrics exported to final results. Zero manual intervention required.
+**Key Design Principle**: Client emits phase labels (`warmup`, `measurement`) with all metrics. Only `phase="measurement"` metrics exported to final results. Zero manual intervention required.
 
-### 2.6 Baseline Testing Strategy
+### 2.6 Baseline Testing Strategy and Durability Equivalence
 
-Before testing replicated clusters, establish single-node baselines:
-1. **Single-node PostgreSQL** (no replication, synchronous_commit=local)
-2. **Single-node TigerBeetle** (no replication)
-3. Document baseline throughput and latency
-4. Express replicated cluster results as degradation percentage from baseline
+**Baseline Approach**:
+This benchmark focuses on comparing TigerBeetle and PostgreSQL under **equivalent durability and replication guarantees**. We are NOT interested in:
+- Async PostgreSQL (synchronous_commit=off) as a baseline
+- Single-node deployments without replication
+
+**Target Configuration for Fair Comparison**:
+- **TigerBeetle**: 3-node cluster with replication_quorum=2 (synchronous replication to majority)
+- **PostgreSQL**: 3-node cluster with `synchronous_standby_names = 'ANY 2 (*)'` and `synchronous_commit=on/remote_apply` (synchronous replication to majority)
+
+Both configurations provide:
+- Durability: Data persisted to disk on multiple nodes
+- Consistency: Quorum-based replication (2 of 3 nodes must acknowledge)
+- Availability: System tolerates single node failure
+
+**Testing Multiple Durability Levels**:
+While the fair comparison uses equivalent durability, we will test PostgreSQL at multiple `synchronous_commit` levels to understand the performance/durability tradeoff:
+- `off` - Fully async (NOT equivalent to TigerBeetle, documented for reference only)
+- `local` - Local fsync only (NOT equivalent to TigerBeetle)
+- `remote_write` - Written to standby OS cache
+- `remote_apply` - Applied to standby database (closest to TigerBeetle's guarantees)
+- `on` - Same as `remote_apply` for synchronous standbys
+
+**Documentation Note**: Results will clearly label which PostgreSQL configuration is comparable to TigerBeetle (3-node, remote_apply, quorum=2). Other configurations shown for educational purposes only.
 
 ### 2.7 Local Testing Documentation
 
@@ -300,10 +350,12 @@ Create detailed local testing documentation with:
 - Prerequisites (Docker, Rust toolchain)
 - How to run tests step-by-step
 - Configuration options explained
-- Understanding test phases (warmup, ramp-up, measurement)
+- Understanding test modes (max_throughput vs fixed_rate)
+- Understanding test phases (warmup, measurement)
 - How to access Grafana dashboards
 - Interpreting metrics and identifying client saturation
 - Statistical validity requirements (multiple runs, variance thresholds)
+- Software version pinning (Docker images, database versions)
 - Troubleshooting common issues
 
 ## Phase 3: Cloud Infrastructure (AWS)
@@ -324,6 +376,7 @@ Create detailed local testing documentation with:
   - NVMe instance storage provides ~250k IOPS, ~4 GB/s throughput (vs gp3: 3k-16k IOPS)
   - Critical for database workloads with high write throughput
   - Data ephemeral (acceptable for benchmarking, not production)
+  - **Verify NVMe mounting**: Setup script must verify NVMe device is mounted before starting database
 - For PostgreSQL: Set up synchronous 3-node cluster replication (matching TigerBeetle's consistency model)
   - Primary + 2 synchronous standbys
   - Configure `synchronous_standby_names = 'ANY 2 (*)'` for 2-of-3 quorum
@@ -332,6 +385,7 @@ Create detailed local testing documentation with:
 - For TigerBeetle: 3-node cluster with synchronous replication
 - Install node-exporter for metrics
 - Automated setup scripts via user-data
+- **Version pinning**: Pin PostgreSQL version, TigerBeetle version, and all Docker image tags
 
 **Client Cluster Module**:
 - Configurable number of EC2 instances via `num_client_nodes` variable (c5.large: 2 vCPU, 4 GB RAM) - compute-optimized
@@ -364,6 +418,14 @@ Before running tests, measure network latency between database nodes:
 - Export as part of test metadata
 - Critical for understanding synchronous replication overhead
 
+**Clock Synchronization Note**:
+- All latency measurements are computed **locally on each client node**
+- Each client records start time and end time for its own requests
+- Clients export serialized HdrHistogram data (not timestamps)
+- Server-side coordinator aggregates histograms using `histogram.add()`
+- **No cross-node clock synchronization required** for latency measurements
+- NTP drift only matters for correlating logs/events, not for performance metrics
+
 ### 3.4 Automated Cloud Test Orchestration
 
 Cloud tests run fully automatically from laptop with zero manual intervention during execution.
@@ -376,11 +438,13 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
    - Automated health checks for all services
 
 2. **Pre-Test Setup**:
+   - **NVMe verification**: Verify i4i instance storage is mounted on all DB nodes
+   - **Version verification**: Verify PostgreSQL/TigerBeetle versions match pinned versions
    - **Network latency measurement**: Automatically measure RTT between all DB node pairs
    - Export network metrics to `results/{config_name}/network_latency.json`
    - Deploy client binary to all client nodes (parallel deployment)
    - Initialize database cluster (create accounts with initial balance 1,000,000)
-   - For PostgreSQL: Run VACUUM, disable auto-vacuum
+   - For PostgreSQL: Run explicit CHECKPOINT + VACUUM ANALYZE, disable auto-vacuum
    - Start OpenTelemetry Collector + Prometheus + Grafana on dedicated monitoring instance
 
 3. **Automated Multi-Run Test Loop** (N runs, default: 3):
@@ -395,22 +459,17 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
 
    b. **Phase 1: Warmup** (default 120s):
       - All clients emit: `test.phase="warmup"`, `run_id=N` via OpenTelemetry
-      - Full workload at target concurrency on all client nodes
+      - Full workload at target load (max_throughput: concurrency, fixed_rate: rate) on all client nodes
+      - Fills buffer pools, completes JIT compilation, stabilizes system
       - Metrics sent to OTel Collector, tagged for exclusion from results
 
-   c. **Phase 2: Ramp-up** (default 60s):
-      - All clients emit: `test.phase="rampup"`, `run_id=N` via OpenTelemetry
-      - Coordinated linear ramp from 0 to target concurrency
-      - Each client ramps independently (0→10 over 60s per client)
-      - Metrics sent to OTel Collector, excluded from results
-
-   d. **Phase 3: Measurement** (default 300s):
+   c. **Phase 2: Measurement** (default 300s):
       - All clients emit: `test.phase="measurement"`, `run_id=N` via OpenTelemetry
-      - Stable workload at target concurrency
+      - Continue stable workload at target load
       - **All metrics from this phase used for final results**
       - Each client records local metrics in HdrHistogram
 
-   e. **Per-Run Data Collection**:
+   d. **Per-Run Data Collection**:
       - Each client exports local metrics to coordinator
       - Coordinator aggregates across all client nodes:
         - Sum throughputs from all clients
@@ -421,10 +480,12 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
       - Export to `results/{config_name}/run_{N}_{timestamp}.json`
 
    f. **Database Reset Between Runs**:
-      - For PostgreSQL: DROP DATABASE on primary + recreate schema + repopulate accounts (propagates to standbys, ensures clean buffer pool)
+      - For PostgreSQL:
+        - DROP DATABASE on primary + recreate schema + repopulate accounts (propagates to standbys, ensures clean buffer pool)
+        - Run explicit CHECKPOINT to ensure WAL flush completion
+        - Run VACUUM ANALYZE after repopulation
       - For TigerBeetle: Truncate transfers on all nodes, reset account balances
-      - For PostgreSQL: Run VACUUM ANALYZE after repopulation
-      - Wait 60s for cluster stabilization (WAL flush, buffer cache, network draining)
+      - Wait 60s for cluster stabilization (checkpoint completion, WAL flush, buffer cache, network draining)
 
 4. **Automated Result Aggregation** (same as local):
 
@@ -443,7 +504,6 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
       - Flag error rate > 5% (invalid test)
       - Check for client saturation (CPU > 80%)
       - Check for network issues (high inter-node latency variance)
-      - Verify clock sync: acceptable NTP drift < 1ms
 
    d. Export aggregated results:
       - `results/{config_name}/aggregate_{timestamp}.json` with statistics and validation
@@ -486,29 +546,39 @@ Simple barrier synchronization mechanism for coordinating multiple client nodes:
 
 ### 4.1 Configuration Matrix
 
+**Test Modes**:
+1. **max_throughput**: Find maximum sustainable throughput for each configuration
+   - Run with varying concurrency levels to find saturation point
+   - Primary metric: maximum TPS (transactions per second)
+
+2. **fixed_rate**: Measure latency distribution under various load levels
+   - Run at 50%, 75%, 90%, 95% of max throughput (from max_throughput tests)
+   - Primary metric: latency percentiles under realistic load
+   - Enables coordinated omission correction for accurate tail latencies
+
 **PostgreSQL configurations to test**:
 - Isolation levels: READ COMMITTED, REPEATABLE READ, SERIALIZABLE
 - Synchronous commit levels: off, local, remote_write, remote_apply, on
+- Fair comparison to TigerBeetle: 3-node, synchronous_commit=remote_apply, quorum=2
 
 **Workload scenarios**:
-- Low contention: 1M accounts, low concurrency
-- High contention: 10K accounts, high concurrency
-- Hot accounts: Zipfian with high skew (exponent ~1.5)
-- Uniform: Zipfian with low skew (exponent ~0)
+- Low contention: 1M accounts, Zipfian with low skew (exponent ~0)
+- High contention: 10K accounts, Zipfian with high skew (exponent ~1.5)
+- Medium contention: 100K accounts, Zipfian with medium skew (exponent ~1.0)
 
 ### 4.2 Configuration File Format
 
-Example:
+**Example 1: max_throughput mode**
 ```toml
 [workload]
+test_mode = "max_throughput"
 num_accounts = 100000
-concurrency = 10  # 2x vCPU count for c5.large (2 vCPU)
+concurrency = 10  # concurrent workers per client node
 zipfian_exponent = 1.0
 initial_balance = 1000000
 min_transfer_amount = 1
 max_transfer_amount = 1000
 warmup_duration_secs = 120
-rampup_duration_secs = 60
 test_duration_secs = 300  # measurement phase only
 test_runs = 3  # number of runs per configuration
 max_variance_threshold = 0.10  # 10% max variance between runs
@@ -524,13 +594,44 @@ pool_recycling_method = "verified"
 auto_vacuum = false
 
 [tigerbeetle]
-batch_size = "auto"  # or explicit size up to 8189
-use_single_batcher = false
 replication_quorum = 2
 measure_batch_sizes = true
 
 [deployment]
 type = "cloud"  # or "local"
+num_db_nodes = 3
+num_client_nodes = 5
+measure_network_latency = true
+
+[monitoring]
+metrics_port = 9090
+grafana_port = 3000
+```
+
+**Example 2: fixed_rate mode**
+```toml
+[workload]
+test_mode = "fixed_rate"
+target_rate = 5000  # requests per second (total across all clients)
+max_concurrency = 1000  # safety limit
+num_accounts = 100000
+zipfian_exponent = 1.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 120
+test_duration_secs = 300
+test_runs = 3
+
+[database]
+type = "tigerbeetle"
+
+[tigerbeetle]
+replication_quorum = 2
+measure_batch_sizes = true
+
+[deployment]
+type = "cloud"
 num_db_nodes = 3
 num_client_nodes = 5
 measure_network_latency = true
@@ -555,23 +656,22 @@ Consider adding these test scenarios:
 - Recovery time after node failure
 - Impact of lagging replicas
 
-**Connection Pool Sizing Tests**:
-- Test multiple pool sizes (10, 20, 50, 100, 200)
-- Identify optimal pool size for workload
-- Measure connection wait time at different pool sizes
-
 ### 4.4 Cloud Testing Documentation
 
 Create detailed cloud testing documentation with:
 - Prerequisites (Terraform, AWS credentials, SSH keys)
 - How to provision infrastructure
+- Software version pinning strategy (PostgreSQL, TigerBeetle, Docker images)
+- NVMe instance storage verification on i4i instances
 - Network latency measurement procedures
 - How to run tests from laptop remotely
-- Understanding test phases and metrics
+- Understanding test modes (max_throughput vs fixed_rate)
+- Understanding test phases (warmup, measurement)
 - How to access Grafana dashboards (port forwarding or public access)
 - Identifying client saturation vs database saturation
 - How to run multiple tests on same infrastructure (using data cleanup script)
 - Statistical validity: interpreting variance and confidence intervals
+- Error classification: business rejections vs database errors
 - How to fully teardown infrastructure
 - Troubleshooting common issues (high variance, client saturation, network issues)
 - AWS cost estimation
@@ -600,30 +700,43 @@ For each isolation level (READ COMMITTED, REPEATABLE READ, SERIALIZABLE):
 This plan incorporates the following critical performance testing best practices:
 
 ### Statistical Validity
-- **Multiple runs**: 3-5 runs per configuration (default: 3)
+- **Multiple runs**: 3 runs per configuration (default)
 - **Variance thresholds**: Flag results with >10% variance for investigation
 - **Confidence intervals**: Report mean, standard deviation, and coefficient of variation
 - **Outlier handling**: Flag and investigate high-variance runs before accepting results
+- **Software version pinning**: Pin PostgreSQL, TigerBeetle, and Docker image versions for reproducibility
 
 ### Test Execution Strategy
-- **Warmup phase**: 120s to fill buffer pools, caches, and complete JIT compilation
-- **Ramp-up phase**: 60s linear increase to target concurrency (avoid cold-start artifacts)
-- **Measurement phase**: 300s stable load with metrics collection
-- **Baseline establishment**: Single-node tests before replicated cluster tests
-- **Result normalization**: Express replicated results as degradation % from baseline
+- **Two test modes**:
+  1. **max_throughput**: Closed-loop testing for maximum TPS measurement
+  2. **fixed_rate**: Open-loop testing for accurate latency under realistic load
+- **Warmup phase**: 120s at full target load to fill buffer pools, complete JIT compilation, stabilize connections
+- **Measurement phase**: 300s at full target load with metrics collection
+- **No ramp-up phase**: Warmup already runs at full load; ramp-up only useful for capacity testing
+- **Baseline establishment**: Compare equivalent durability/replication configurations (3-node, quorum=2)
+- **Database reset between runs**: DROP DATABASE (PostgreSQL) or truncate+reset (TigerBeetle) with explicit CHECKPOINT
 
 ### Latency Measurement
-- **HdrHistogram**: Use `record()` for max-throughput tests (coordinated omission correction requires known arrival rate)
-- **Phase separation**: Only collect metrics during measurement phase
-- **Client saturation detection**: Monitor client CPU to ensure database limits are measured, not client limits
+- **HdrHistogram configuration**: `Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)` (1μs to 60s, 3 sig figs)
+- **max_throughput mode**: `record(value)` for closed-loop service time (underreports tails)
+- **fixed_rate mode**: `record_correct(value, expected_interval)` for coordinated omission correction
+- **Multi-client aggregation**: Export serialized histograms, merge with `histogram.add()`
+- **Phase separation**: Only measurement phase metrics exported to final results
+- **Client saturation detection**: Monitor client CPU to ensure database limits are measured
 - **Error rate validation**: Tests with >5% error rate flagged as invalid
-- **Note**: With zero think time, latencies reflect closed-loop system behavior, not open-loop arrival patterns
+- **Local latency computation**: All measurements computed on client nodes; no cross-node clock sync required
 
 ### TigerBeetle-Specific
-- **Batch fragmentation awareness**: Multiple workers fragment batches across event loops
+- **Default batching**: Use TigerBeetle client's default batching behavior (no custom configuration)
 - **Batch size measurement**: Record actual batch sizes to understand batching efficiency
-- **Single-batcher option**: Optional architecture to maximize batch sizes
-- **Cluster configuration**: Document replication quorum and client routing
+- **Cluster configuration**: 3-node cluster with replication_quorum=2 for fair comparison to PostgreSQL
+
+### Error Classification
+- **Insufficient balance**: Business rejection, count as successful request (not an error)
+- **Serialization failure**: Database error, retry with exponential backoff
+  - Only count as error after max retries exhausted
+- **Clear separation**: Business rejections tracked separately from database errors
+- **Validation**: Tests with >5% database error rate are invalid
 
 ### PostgreSQL-Specific
 - **Connection pool sizing**: Start with 2x vCPU count (not arbitrary large pools)
@@ -631,19 +744,22 @@ This plan incorporates the following critical performance testing best practices
 - **Pool recycling method**: Use `RecyclingMethod::Verified` for consistency
 - **Auto-vacuum control**: Disable during tests, run VACUUM ANALYZE before each test
 - **Buffer pool consistency**: DROP DATABASE between runs for clean buffer pool state
+- **Explicit CHECKPOINT**: Run CHECKPOINT before VACUUM ANALYZE to ensure WAL flush completion
 - **Isolation level testing**: Test multiple levels with documented trade-offs
 
 ### Cloud Testing
-- **Network latency measurement**: Record inter-node latency before tests
-- **Clock synchronization**: NTP with <1ms drift tolerance for accurate metric correlation
-- **Multiple runs with cleanup**: Reset database state between runs with 60s stabilization
-- **Client coordination**: Barrier synchronization for simultaneous start
+- **Network latency measurement**: Record inter-node latency before tests using ping/iperf3
+- **NVMe verification**: Verify i4i instance storage is properly mounted before tests
+- **Clock synchronization**: Not required for latency measurements (computed locally on clients)
+  - NTP drift only matters for log correlation, not performance metrics
+- **Multiple runs with cleanup**: Reset database state between runs with 60s stabilization and explicit CHECKPOINT
+- **Client coordination**: Barrier synchronization for simultaneous start across client nodes
 - **Resource monitoring**: Track CPU, memory, disk I/O, network I/O on all nodes
 
 ### Additional Considerations
 - **Endurance testing**: 2-4 hour tests to detect long-term issues (memory leaks, checkpoint patterns)
+  - PostgreSQL: Need 24+ checkpoint cycles (default 5min = 2 hours minimum)
 - **Failure testing**: Optional failover and recovery performance measurement
-- **Connection pool tuning**: Test multiple pool sizes to find optimal configuration
-- **Think time**: Zero by default (max throughput focus), configurable for realistic workload modeling
+- **Test mode flexibility**: max_throughput for finding capacity, fixed_rate for realistic latency measurement
 
 
