@@ -120,7 +120,7 @@ For `test_mode = "fixed_rate"`:
 - `auto_vacuum` - Enable/disable (default: false)
 
 **`[tigerbeetle]` section** (used by clients when database.type = "tigerbeetle"):
-- `replication_quorum` - Quorum for 3-node cluster (default: 2)
+- `cluster_addresses` - TigerBeetle cluster connection addresses
 - `measure_batch_sizes` - Record actual batch sizes (default: true)
 
 **`[deployment]` section** (used by coordinator):
