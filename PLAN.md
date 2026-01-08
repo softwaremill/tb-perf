@@ -5,17 +5,13 @@ Build a comprehensive performance comparison framework for TigerBeetle vs Postgr
 
 ## Quick Summary
 
-- Rust-based benchmarking client for TigerBeetle vs PostgreSQL
-- Double-entry bookkeeping workload with Zipfian distribution
-- Local (Docker) and cloud (AWS 3-node clusters) deployment modes
-- **Two test modes**:
-  - **max_throughput**: Closed-loop for finding maximum TPS
-  - **fixed_rate**: Open-loop with coordinated omission correction for accurate latency
-- Automated test execution: warmup → measurement phases (no ramp-up)
-- Multiple runs with automatic statistical aggregation (mean, stddev, CV, confidence intervals)
-- **Fair comparison**: Equivalent durability/replication (3-node, quorum=2) for both systems
-- Full observability: OpenTelemetry + Grafana + JSON/CSV exports
-- Zero manual intervention during test execution
+- Performance comparison framework for TigerBeetle vs PostgreSQL
+- Double-entry bookkeeping workload
+- Local and cloud deployment modes
+- Two test modes: maximum throughput and fixed request rate
+- Automated test execution with multiple runs
+- Equivalent durability and replication for fair comparison
+- Full observability and metrics collection
 
 ## Technology Stack
 
