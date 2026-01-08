@@ -144,138 +144,24 @@ For `test_mode = "fixed_rate"`:
 - `prometheus_port` - Prometheus port (default: 9090)
 - `otel_collector_port` - OpenTelemetry Collector port (default: 4317)
 
-### 1.4 Configuration File Examples
-
-**Example 1: Local max_throughput test with PostgreSQL**
-```toml
-[workload]
-test_mode = "max_throughput"
-concurrency = 10
-num_accounts = 100000
-zipfian_exponent = 1.0
-initial_balance = 1000000
-min_transfer_amount = 1
-max_transfer_amount = 1000
-warmup_duration_secs = 120
-test_duration_secs = 300
-
-[database]
-type = "postgresql"
-
-[postgresql]
-isolation_level = "read_committed"
-synchronous_commit = "remote_apply"
-connection_pool_size = 20
-pool_recycling_method = "verified"
-auto_vacuum = false
-
-[deployment]
-type = "local"
-num_db_nodes = 1
-
-[coordinator]
-test_runs = 3
-max_variance_threshold = 0.10
-max_error_rate = 0.05
-metrics_export_path = "./results"
-keep_grafana_running = false
-
-[monitoring]
-grafana_port = 3000
-prometheus_port = 9090
-```
-
-**Example 2: Cloud fixed_rate test with TigerBeetle**
-```toml
-[workload]
-test_mode = "fixed_rate"
-target_rate = 5000  # total across all 5 client instances
-max_concurrency = 1000
-num_accounts = 100000
-zipfian_exponent = 1.0
-initial_balance = 1000000
-min_transfer_amount = 1
-max_transfer_amount = 1000
-warmup_duration_secs = 120
-test_duration_secs = 300
-
-[database]
-type = "tigerbeetle"
-
-[tigerbeetle]
-replication_quorum = 2
-measure_batch_sizes = true
-
-[deployment]
-type = "cloud"
-num_db_nodes = 3
-num_client_nodes = 5
-aws_region = "us-east-1"
-db_instance_type = "i4i.xlarge"
-client_instance_type = "c5.large"
-measure_network_latency = true
-
-[coordinator]
-test_runs = 3
-max_variance_threshold = 0.10
-max_error_rate = 0.05
-metrics_export_path = "./results"
-keep_grafana_running = true
-
-[monitoring]
-grafana_port = 3000
-prometheus_port = 9090
-otel_collector_port = 4317
-```
-
-### 1.5 Configuration Parsing Implementation
+### 1.4 Configuration Parsing Implementation
 
 Implement configuration parsing in the `common` crate:
 
-**Configuration struct**:
-```rust
-// common/src/config.rs
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Config {
-    pub workload: WorkloadConfig,
-    pub database: DatabaseConfig,
-    #[serde(default)]
-    pub postgresql: Option<PostgresqlConfig>,
-    #[serde(default)]
-    pub tigerbeetle: Option<TigerBeetleConfig>,
-    pub deployment: DeploymentConfig,
-    pub coordinator: CoordinatorConfig,
-    pub monitoring: MonitoringConfig,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct WorkloadConfig {
-    pub test_mode: TestMode,
-    pub num_accounts: u64,
-    pub zipfian_exponent: f64,
-    // ... remaining fields
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TestMode {
-    MaxThroughput { concurrency: usize },
-    FixedRate { target_rate: u64, max_concurrency: usize },
-}
-```
+**Configuration structure**:
+- Define structs for each configuration section using serde
+- Support conditional sections based on test mode and database type
+- Use enums for test modes (MaxThroughput, FixedRate) with associated parameters
 
 **Loading and validation**:
-- Load TOML file using `toml` crate
+- Load TOML file and deserialize into strongly-typed structs
 - Validate configuration based on test mode and database type
-- Example: If `database.type = "postgresql"`, require `postgresql` section
-- Example: If `test_mode = "max_throughput"`, require `concurrency` field
+- Ensure required sections are present (e.g., postgresql section when database.type = "postgresql")
 - Provide clear error messages for missing or invalid configuration
 
 **Usage**:
-- Coordinator: Reads full config, uses `deployment`, `coordinator`, `monitoring` sections
-- Clients: Reads full config, uses `workload`, `database`, `postgresql`/`tigerbeetle` sections
+- Coordinator reads full config, uses deployment, coordinator, and monitoring sections
+- Clients read full config, use workload, database, and database-specific sections
 - Both components ignore sections they don't need
 
 ## Phase 2: Single-Node Local Implementation
