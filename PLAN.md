@@ -175,36 +175,48 @@ Implement configuration parsing in the `common` crate:
 - Accounts locked in consistent order to prevent deadlocks
 - Balance check before transfer
 
-**Isolation Levels and Concurrency Phenomena**:
+**Isolation Levels and Correctness Analysis**:
 
-Understanding PostgreSQL isolation levels is critical for this benchmark. Create documentation covering:
+Create documentation analyzing isolation levels specifically for the double-entry bookkeeping workload:
 
-**Concurrency Phenomena**:
-- **Dirty Reads**: Reading uncommitted data from another transaction
-- **Non-Repeatable Reads**: Same query returns different results within transaction
-- **Phantom Reads**: New rows appear in range queries within transaction
-- **Lost Updates**: Two transactions read same value, both update, one overwrites the other
-- **Write Skew**: Two transactions read overlapping data and make disjoint updates that violate constraints
-- **Serialization Anomalies**: Results that couldn't occur if transactions executed serially
+**The Double-Entry Transfer Transaction**:
+- Read balances of two accounts (source and destination)
+- Check if source has sufficient balance
+- Debit source account
+- Credit destination account
+- Record transfer in audit log
 
-**PostgreSQL Isolation Levels**:
+**Analysis Required** (to be documented during implementation):
 
-| Isolation Level | Prevents | Allows | Notes |
-|----------------|----------|--------|-------|
-| READ COMMITTED | Dirty reads | Non-repeatable reads, phantom reads | Default; good for most workloads |
-| REPEATABLE READ | Dirty reads, non-repeatable reads | Phantom reads, write skew | Actually implements Snapshot Isolation |
-| SERIALIZABLE | All phenomena | None | Full serializability; highest overhead |
+For each isolation level (READ COMMITTED, REPEATABLE READ, SERIALIZABLE), analyze:
 
-**Performance vs. Correctness Tradeoff**:
-- READ COMMITTED: Lowest overhead, may require application-level retry logic
-- REPEATABLE READ: Moderate overhead, fewer serialization failures than SERIALIZABLE
-- SERIALIZABLE: Highest overhead, most serialization failures, strongest guarantees
+1. **Which concurrency phenomena can occur in this workload?**
+   - Can dirty reads happen? What would be the impact on balance correctness?
+   - Can non-repeatable reads happen? Would this violate double-entry invariants?
+   - Can lost updates occur? Could two transactions overwrite each other's balance changes?
+   - Can write skew occur? Could concurrent transfers violate balance constraints?
+   - Can phantom reads happen in this workload? (Note: workload doesn't use range queries)
 
-**For this benchmark**:
+2. **Does the isolation level impact correctness of double-entry bookkeeping?**
+   - At READ COMMITTED: Can the system produce incorrect balances or violate double-entry invariants?
+   - At REPEATABLE READ: Are there scenarios where correctness is compromised?
+   - At SERIALIZABLE: Is this the only level that guarantees correctness?
+
+3. **Role of pessimistic locking (SELECT FOR UPDATE)**:
+   - How does explicit locking interact with each isolation level?
+   - Does SELECT FOR UPDATE on both accounts prevent correctness issues at lower isolation levels?
+   - What phenomena does locking prevent vs. what isolation level prevents?
+
+4. **Performance vs. correctness tradeoff**:
+   - If lower isolation levels are safe (with proper locking), document why
+   - If lower isolation levels are unsafe, document specific failure scenarios
+   - Document serialization failure rates expected at each level
+
+**Testing approach**:
 - Test all three isolation levels
-- Document serialization failure rates at each level
+- Verify balances after test completion (sum of all balances should equal initial total)
+- Track serialization failure rates at each level
 - Compare throughput degradation vs. isolation level
-- Note: REPEATABLE READ in PostgreSQL is Snapshot Isolation, not true repeatable read
 
 ### 2.2 TigerBeetle Setup
 
@@ -378,11 +390,15 @@ Understanding PostgreSQL isolation levels is critical for this benchmark. Create
       - Coefficient of variation (CV = stddev/mean)
       - Confidence intervals (95% CI)
 
-   c. Validate statistical consistency:
+   c. Validate statistical consistency and correctness:
       - Flag runs where throughput CV > 10%
       - Flag runs where p99 latency CV > 15%
       - Flag runs where error rate > 5% (invalid test)
       - Warn if variance exceeds thresholds
+      - **Correctness validation**: Verify sum of all account balances equals initial total
+        - Query all account balances after test completion
+        - Compare to expected total (num_accounts × initial_balance)
+        - Flag any discrepancy (indicates data corruption or incorrect transaction logic)
 
    d. Export aggregated results to `results/{config_name}/aggregate_{timestamp}.json` with mean, stddev, CV, confidence intervals, and validation warnings
 
@@ -574,12 +590,15 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
       - 95% confidence intervals
       - Per-run values for debugging
 
-   c. Statistical validation:
+   c. Statistical validation and correctness:
       - Flag throughput CV > 10%
       - Flag p99 latency CV > 15%
       - Flag error rate > 5% (invalid test)
       - Check for client saturation (CPU > 80%)
       - Check for network issues (high inter-node latency variance)
+      - **Correctness validation**: Verify sum of all account balances equals initial total
+        - Query all account balances after test completion
+        - Flag any discrepancy (indicates data corruption or incorrect transaction logic)
 
    d. Export aggregated results:
       - `results/{config_name}/aggregate_{timestamp}.json` with statistics and validation
