@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = [
+    "coordinator",
+    "client",
+    "common",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Adam Warski"]
+license = "Apache2"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.48", features = ["full"] }
+
+# Configuration and serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging and tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Metrics and observability
+opentelemetry = "0.27"
+opentelemetry-otlp = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+
+# PostgreSQL
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+deadpool-postgres = "0.14"
+
+# TigerBeetle
+tigerbeetle-unofficial = "0.14"
+
+# Random number generation
+rand = "0.9"
+rand_distr = "0.5"
+
+# Latency measurement
+hdrhistogram = "7"
+
+# Common crate
+tb-perf-common = { path = "common" }
