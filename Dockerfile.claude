@@ -1,0 +1,22 @@
+# Start from the official Claude Code sandbox image
+FROM docker/sandbox-templates:claude-code
+
+# Switch to root to install system dependencies
+USER root
+
+# Install Rust via rustup (standard way for Linux)
+# We also install:
+#   - build-essential: linker/compiler
+#   - libclang-dev: required by bindgen for TigerBeetle FFI bindings
+RUN apt-get update && apt-get install -y build-essential libclang-dev \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# Add Rust binaries to the PATH for all future layers and the user
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Switch back to the default user if the base image requires it
+# (The Claude sandbox usually runs as root or a 'sandbox' user)
+USER root
+
+# Verify installation
+RUN rustc --version
