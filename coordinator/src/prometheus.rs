@@ -68,10 +68,7 @@ impl PrometheusClient {
             .context("Failed to query Prometheus")?;
 
         if !response.status().is_success() {
-            warn!(
-                "Prometheus query failed with status: {}",
-                response.status()
-            );
+            warn!("Prometheus query failed with status: {}", response.status());
             return Ok(None);
         }
 
@@ -112,7 +109,10 @@ impl PrometheusClient {
             "sum(increase({}{{phase=\"measurement\"}}[{}]))",
             metric, range
         );
-        Ok(self.query_at(&query, query_time).await?.map(|v| v.round() as u64))
+        Ok(self
+            .query_at(&query, query_time)
+            .await?
+            .map(|v| v.round() as u64))
     }
 
     /// Query a histogram metric for a specific quantile
@@ -176,16 +176,28 @@ impl PrometheusClient {
         }
 
         // Query latency percentiles
-        if let Some(v) = self.query_histogram_quantile(LATENCY, 0.50, &range, query_end).await? {
+        if let Some(v) = self
+            .query_histogram_quantile(LATENCY, 0.50, &range, query_end)
+            .await?
+        {
             metrics.latency_p50_us = v;
         }
-        if let Some(v) = self.query_histogram_quantile(LATENCY, 0.95, &range, query_end).await? {
+        if let Some(v) = self
+            .query_histogram_quantile(LATENCY, 0.95, &range, query_end)
+            .await?
+        {
             metrics.latency_p95_us = v;
         }
-        if let Some(v) = self.query_histogram_quantile(LATENCY, 0.99, &range, query_end).await? {
+        if let Some(v) = self
+            .query_histogram_quantile(LATENCY, 0.99, &range, query_end)
+            .await?
+        {
             metrics.latency_p99_us = v;
         }
-        if let Some(v) = self.query_histogram_quantile(LATENCY, 0.999, &range, query_end).await? {
+        if let Some(v) = self
+            .query_histogram_quantile(LATENCY, 0.999, &range, query_end)
+            .await?
+        {
             metrics.latency_p999_us = v;
         }
 

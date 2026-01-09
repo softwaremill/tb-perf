@@ -1,15 +1,15 @@
 use crate::metrics::{TestPhase, WorkloadMetrics};
-use crate::workload::{sql_results, AccountSelector, TransferGenerator, TransferResult};
+use crate::workload::{AccountSelector, TransferGenerator, TransferResult, sql_results};
 use anyhow::{Context, Result};
 use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
-use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use rand::rngs::SmallRng;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tb_perf_common::config::{IsolationLevel, PostgresqlConfig};
-use tokio_postgres::error::SqlState;
 use tokio_postgres::NoTls;
+use tokio_postgres::error::SqlState;
 use tracing::{debug, error, info, warn};
 
 /// Maximum number of retries for serialization failures
@@ -243,12 +243,19 @@ impl PostgresWorkload {
             let mut next_submit = Instant::now();
 
             while !stop.load(Ordering::Relaxed) {
-                // Rate limit
+                // Rate limit - sleep until scheduled time
                 let now = Instant::now();
                 if now < next_submit {
                     tokio::time::sleep(next_submit - now).await;
                 }
-                next_submit = Instant::now() + expected_interval;
+
+                // Record scheduled time for coordinated omission correction
+                // Latency includes any queue wait time if we're running behind
+                let scheduled_time = next_submit;
+
+                // Advance schedule by fixed interval (not from current time)
+                // This maintains intended rate even when running behind
+                next_submit += expected_interval;
 
                 // Get current phase for metrics
                 let current_phase = if phase.load(Ordering::Relaxed) {
@@ -273,7 +280,6 @@ impl PostgresWorkload {
                 let metrics = metrics.clone();
                 let count = count.clone();
                 let flight = flight.clone();
-                let submit_time = Instant::now();
 
                 flight.fetch_add(1, Ordering::Relaxed);
 
@@ -281,7 +287,9 @@ impl PostgresWorkload {
                     let result =
                         execute_transfer_with_retry(&pool, &isolation, source, dest, amount).await;
 
-                    let latency = submit_time.elapsed();
+                    // Measure from scheduled time, not actual submit time
+                    // This properly accounts for coordinated omission
+                    let latency = scheduled_time.elapsed();
                     let latency_us = latency.as_micros() as u64;
 
                     match result {
