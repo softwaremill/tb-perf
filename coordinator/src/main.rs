@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::time::Duration;
 use tb_perf_common::Config;
-use tb_perf_common::config::DeploymentType;
+use tb_perf_common::config::{DatabaseType, DeploymentType};
 use tracing::{info, warn};
 
 mod docker;
@@ -10,6 +10,7 @@ mod postgres_setup;
 mod prometheus;
 mod results;
 mod test_runner;
+mod tigerbeetle_setup;
 
 use docker::{DockerManager, find_compose_file};
 use test_runner::TestRunner;
@@ -85,7 +86,20 @@ async fn run_local_tests(config: &Config, args: &Args) -> Result<()> {
     // Start infrastructure
     if !args.no_docker {
         docker.start().await?;
-        docker.wait_for_services(Duration::from_secs(60)).await?;
+
+        // Wait for database-specific services
+        match config.database.kind {
+            DatabaseType::PostgreSQL => {
+                docker
+                    .wait_for_postgres_services(Duration::from_secs(60))
+                    .await?;
+            }
+            DatabaseType::TigerBeetle => {
+                docker
+                    .wait_for_tigerbeetle_services(Duration::from_secs(60))
+                    .await?;
+            }
+        }
     } else {
         info!("Skipping Docker start (--no-docker flag)");
     }

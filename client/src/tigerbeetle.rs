@@ -1,29 +1,21 @@
 use crate::metrics::WorkloadMetrics;
 use crate::workload::{
     AccountSelector, PhaseController, TransferGenerator, TransferResult, get_current_phase,
-    record_transfer_result, sql_results,
+    record_transfer_result,
 };
 use anyhow::{Context, Result};
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tb_perf_common::config::{IsolationLevel, PostgresqlConfig};
-use tokio_postgres::NoTls;
-use tokio_postgres::error::SqlState;
+use tb::error::{CreateTransferErrorKind, CreateTransfersError};
+use tigerbeetle_unofficial as tb;
 use tracing::{debug, error, info, warn};
 
-/// Maximum number of retries for serialization failures
-const MAX_RETRIES: u32 = 5;
-/// Base delay for exponential backoff (milliseconds)
-const BASE_RETRY_DELAY_MS: u64 = 10;
-
-/// PostgreSQL workload executor
-pub struct PostgresWorkload {
-    pool: Pool,
-    isolation_level: IsolationLevel,
+/// TigerBeetle workload executor
+pub struct TigerBeetleWorkload {
+    client: Arc<tb::Client>,
     account_selector: AccountSelector,
     transfer_generator: TransferGenerator,
     metrics: WorkloadMetrics,
@@ -31,64 +23,36 @@ pub struct PostgresWorkload {
     test_duration: Duration,
 }
 
-impl PostgresWorkload {
-    /// Create a new PostgreSQL workload executor
+impl TigerBeetleWorkload {
+    /// Create a new TigerBeetle workload executor
+    ///
+    /// Note: `measure_batch_sizes` parameter is accepted for API compatibility
+    /// but not currently used. TigerBeetle batching is handled internally.
     pub async fn new(
-        pg_config: &PostgresqlConfig,
-        host: &str,
-        port: u16,
-        database: &str,
-        user: &str,
-        password: &str,
+        cluster_addresses: &[String],
         num_accounts: u64,
         zipfian_exponent: f64,
         min_transfer_amount: u64,
         max_transfer_amount: u64,
         warmup_duration_secs: u64,
         test_duration_secs: u64,
+        _measure_batch_sizes: bool,
         metrics: WorkloadMetrics,
     ) -> Result<Self> {
-        // Build tokio_postgres config
-        let mut pg_conn_config = tokio_postgres::Config::new();
-        pg_conn_config.host(host);
-        pg_conn_config.port(port);
-        pg_conn_config.dbname(database);
-        pg_conn_config.user(user);
-        pg_conn_config.password(password);
+        // TigerBeetle cluster ID 0 for local development
+        let cluster_id = 0;
 
-        let recycling_method = match pg_config.pool_recycling_method {
-            tb_perf_common::config::PoolRecyclingMethod::Fast => RecyclingMethod::Fast,
-            tb_perf_common::config::PoolRecyclingMethod::Verified => RecyclingMethod::Verified,
-        };
+        // Join addresses with comma for TigerBeetle client
+        let addresses = cluster_addresses.join(",");
+        info!("Connecting to TigerBeetle cluster: {}", addresses);
 
-        let mgr_config = ManagerConfig { recycling_method };
-        let mgr = Manager::from_config(pg_conn_config, NoTls, mgr_config);
+        let client = tb::Client::new(cluster_id, &addresses)
+            .context("Failed to create TigerBeetle client")?;
 
-        let pool = Pool::builder(mgr)
-            .max_size(pg_config.connection_pool_size)
-            .build()
-            .context("Failed to create connection pool")?;
-
-        // Pre-warm connection pool
-        info!(
-            "Pre-warming connection pool with {} connections",
-            pg_config.connection_pool_size
-        );
-        let mut handles = Vec::new();
-        for _ in 0..pg_config.connection_pool_size {
-            let pool = pool.clone();
-            handles.push(tokio::spawn(async move {
-                let _ = pool.get().await;
-            }));
-        }
-        for handle in handles {
-            let _ = handle.await;
-        }
-        info!("Connection pool warmed up");
+        info!("Connected to TigerBeetle cluster");
 
         Ok(Self {
-            pool,
-            isolation_level: pg_config.isolation_level.clone(),
+            client: Arc::new(client),
             account_selector: AccountSelector::new(num_accounts, zipfian_exponent),
             transfer_generator: TransferGenerator::new(min_transfer_amount, max_transfer_amount),
             metrics,
@@ -109,8 +73,7 @@ impl PostgresWorkload {
         // Spawn workers
         let mut handles = Vec::new();
         for worker_id in 0..concurrency {
-            let pool = self.pool.clone();
-            let isolation_level = self.isolation_level.clone();
+            let client = self.client.clone();
             let account_selector = self.account_selector.clone();
             let transfer_generator = self.transfer_generator.clone();
             let metrics = self.metrics.clone();
@@ -121,8 +84,7 @@ impl PostgresWorkload {
             handles.push(tokio::spawn(async move {
                 run_worker(
                     worker_id,
-                    pool,
-                    isolation_level,
+                    client,
                     account_selector,
                     transfer_generator,
                     metrics,
@@ -168,8 +130,7 @@ impl PostgresWorkload {
         let expected_interval = Duration::from_nanos(interval_ns);
 
         // Spawn request submitter
-        let pool = self.pool.clone();
-        let isolation_level = self.isolation_level.clone();
+        let client = self.client.clone();
         let metrics = self.metrics.clone();
         let stop = phase_ctrl.stop_flag();
         let phase = phase_ctrl.phase_flag();
@@ -190,11 +151,9 @@ impl PostgresWorkload {
                 }
 
                 // Record scheduled time for coordinated omission correction
-                // Latency includes any queue wait time if we're running behind
                 let scheduled_time = next_submit;
 
-                // Advance schedule by fixed interval (not from current time)
-                // This maintains intended rate even when running behind
+                // Advance schedule by fixed interval
                 next_submit += expected_interval;
 
                 // Check current phase for dropped request tracking
@@ -211,8 +170,7 @@ impl PostgresWorkload {
                 let (source, dest) = account_selector.select_transfer_accounts(&mut rng);
                 let amount = transfer_generator.generate_amount(&mut rng);
 
-                let pool = pool.clone();
-                let isolation = isolation_level.clone();
+                let client = client.clone();
                 let metrics = metrics.clone();
                 let count = count.clone();
                 let in_flight_task = in_flight_clone.clone();
@@ -221,11 +179,9 @@ impl PostgresWorkload {
                 in_flight_clone.fetch_add(1, Ordering::Relaxed);
 
                 tokio::spawn(async move {
-                    let result =
-                        execute_transfer_with_retry(&pool, &isolation, source, dest, amount).await;
+                    let result = execute_transfer(&client, source, dest, amount).await;
 
-                    // Measure from scheduled time, not actual submit time
-                    // This properly accounts for coordinated omission
+                    // Measure from scheduled time for coordinated omission correction
                     let latency = scheduled_time.elapsed();
                     let latency_us = latency.as_micros() as u64;
 
@@ -259,8 +215,7 @@ impl PostgresWorkload {
 /// Worker task for max_throughput mode
 async fn run_worker(
     worker_id: usize,
-    pool: Pool,
-    isolation_level: IsolationLevel,
+    client: Arc<tb::Client>,
     account_selector: AccountSelector,
     transfer_generator: TransferGenerator,
     metrics: WorkloadMetrics,
@@ -276,8 +231,7 @@ async fn run_worker(
         let amount = transfer_generator.generate_amount(&mut rng);
 
         let start = Instant::now();
-        let result =
-            execute_transfer_with_retry(&pool, &isolation_level, source, dest, amount).await;
+        let result = execute_transfer(&client, source, dest, amount).await;
         let latency = start.elapsed();
         let latency_us = latency.as_micros() as u64;
 
@@ -295,103 +249,50 @@ async fn run_worker(
     debug!("Worker {} stopped", worker_id);
 }
 
-/// Check if an error is a serialization failure using SQLSTATE code
-fn is_serialization_failure(err: &anyhow::Error) -> bool {
-    // Try to extract the underlying tokio_postgres error and check db error code
-    if let Some(pg_err) = err.downcast_ref::<tokio_postgres::Error>()
-        && let Some(db_err) = pg_err.as_db_error()
-    {
-        return db_err.code() == &SqlState::T_R_SERIALIZATION_FAILURE;
-    }
-    // Fallback to string matching for wrapped errors
-    let err_str = err.to_string();
-    err_str.contains("could not serialize access") || err_str.contains("40001")
-}
-
-/// Execute a transfer with retry logic for serialization failures
-async fn execute_transfer_with_retry(
-    pool: &Pool,
-    isolation_level: &IsolationLevel,
-    source: u64,
-    dest: u64,
-    amount: u64,
-) -> Result<TransferResult> {
-    let mut retries = 0;
-
-    loop {
-        match execute_transfer(pool, isolation_level, source, dest, amount).await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                if is_serialization_failure(&e) && retries < MAX_RETRIES {
-                    retries += 1;
-                    let delay = BASE_RETRY_DELAY_MS * 2u64.pow(retries);
-                    debug!("Serialization failure, retry {} after {}ms", retries, delay);
-                    tokio::time::sleep(Duration::from_millis(delay)).await;
-                    continue;
-                }
-
-                if retries >= MAX_RETRIES {
-                    warn!("Transfer failed after {} retries: {:?}", MAX_RETRIES, e);
-                    return Ok(TransferResult::Failed);
-                }
-
-                error!("Transfer error: {:?}", e);
-                return Err(e);
-            }
-        }
-    }
-}
-
-/// Execute a single transfer in one network roundtrip
-///
-/// Uses simple_query to execute BEGIN, SET TRANSACTION, SELECT transfer(), and COMMIT
-/// in a single roundtrip. Safe to interpolate u64 values directly (no SQL injection risk).
-///
-/// Note: synchronous_commit is configured at the PostgreSQL server level (synchronous_commit=on)
-/// to match TigerBeetle's durability guarantees.
+/// Execute a single transfer
 async fn execute_transfer(
-    pool: &Pool,
-    isolation_level: &IsolationLevel,
+    client: &tb::Client,
     source: u64,
     dest: u64,
     amount: u64,
 ) -> Result<TransferResult> {
-    use tokio_postgres::SimpleQueryMessage;
+    // Create the transfer using builder pattern
+    let transfer = tb::Transfer::new(tb::id())
+        .with_debit_account_id(source as u128)
+        .with_credit_account_id(dest as u128)
+        .with_amount(amount as u128)
+        .with_ledger(1)
+        .with_code(1);
 
-    let client = pool.get().await.context("Failed to get connection")?;
-
-    let isolation_level_str = match isolation_level {
-        IsolationLevel::ReadCommitted => "READ COMMITTED",
-        IsolationLevel::RepeatableRead => "REPEATABLE READ",
-        IsolationLevel::Serializable => "SERIALIZABLE",
-    };
-
-    // Execute everything in a single roundtrip
-    let sql = format!(
-        "BEGIN; \
-         SET TRANSACTION ISOLATION LEVEL {}; \
-         SELECT transfer({}, {}, {}); \
-         COMMIT",
-        isolation_level_str, source as i64, dest as i64, amount as i64
-    );
-
-    let messages = client.simple_query(&sql).await?;
-
-    // Find the row with the transfer result
-    for msg in messages {
-        if let SimpleQueryMessage::Row(row) = msg {
-            let status = row.get(0).context("Missing transfer result")?;
-            return match status {
-                sql_results::SUCCESS => Ok(TransferResult::Success),
-                sql_results::INSUFFICIENT_BALANCE => Ok(TransferResult::InsufficientBalance),
-                sql_results::ACCOUNT_NOT_FOUND => Ok(TransferResult::AccountNotFound),
-                _ => {
-                    warn!("Unexpected transfer result: {}", status);
-                    Ok(TransferResult::Failed)
+    match client.create_transfers(vec![transfer]).await {
+        Ok(()) => Ok(TransferResult::Success),
+        Err(CreateTransfersError::Api(api_err)) => {
+            // Check the specific error
+            for err in api_err.as_slice() {
+                match err.kind() {
+                    CreateTransferErrorKind::ExceedsCredits
+                    | CreateTransferErrorKind::ExceedsDebits => {
+                        return Ok(TransferResult::InsufficientBalance);
+                    }
+                    CreateTransferErrorKind::DebitAccountNotFound
+                    | CreateTransferErrorKind::CreditAccountNotFound => {
+                        return Ok(TransferResult::AccountNotFound);
+                    }
+                    _ => {
+                        warn!("Transfer error: {:?}", err.kind());
+                        return Ok(TransferResult::Failed);
+                    }
                 }
-            };
+            }
+            Ok(TransferResult::Failed)
+        }
+        Err(CreateTransfersError::Send(e)) => {
+            error!("Send error: {:?}", e);
+            Err(anyhow::anyhow!("Send error: {:?}", e))
+        }
+        Err(e) => {
+            error!("Unexpected error: {:?}", e);
+            Err(anyhow::anyhow!("Unexpected error: {:?}", e))
         }
     }
-
-    anyhow::bail!("No result from transfer function")
 }

@@ -67,7 +67,9 @@ impl WorkloadMetrics {
 
         let dropped = meter
             .u64_counter("requests_dropped")
-            .with_description("Number of dropped requests due to max concurrency in fixed_rate mode")
+            .with_description(
+                "Number of dropped requests due to max concurrency in fixed_rate mode",
+            )
             .build();
 
         let latency_us = meter

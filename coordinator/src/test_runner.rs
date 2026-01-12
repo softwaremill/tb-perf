@@ -2,11 +2,13 @@ use crate::docker::DockerManager;
 use crate::postgres_setup;
 use crate::prometheus::PrometheusClient;
 use crate::results::{RunResult, TestResults};
+use crate::tigerbeetle_setup;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tb_perf_common::Config;
+use tb_perf_common::config::DatabaseType;
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
@@ -20,10 +22,7 @@ pub struct TestRunner {
 
 impl TestRunner {
     pub fn new(config: Config, config_path: String, docker: DockerManager) -> Self {
-        let prometheus_url = format!(
-            "http://localhost:{}",
-            config.monitoring.prometheus_port
-        );
+        let prometheus_url = format!("http://localhost:{}", config.monitoring.prometheus_port);
         Self {
             config,
             config_path,
@@ -41,11 +40,26 @@ impl TestRunner {
 
         info!("Starting test execution with {} runs", num_runs);
 
-        // Initialize accounts
-        postgres_setup::init_accounts(&self.docker, num_accounts, initial_balance).await?;
-
-        // Run VACUUM ANALYZE before starting
-        postgres_setup::vacuum_analyze(&self.docker).await?;
+        // Initialize database based on type
+        match self.config.database.kind {
+            DatabaseType::PostgreSQL => {
+                postgres_setup::init_accounts(&self.docker, num_accounts, initial_balance).await?;
+                postgres_setup::vacuum_analyze(&self.docker).await?;
+            }
+            DatabaseType::TigerBeetle => {
+                let tb_config = self
+                    .config
+                    .tigerbeetle
+                    .as_ref()
+                    .context("TigerBeetle config missing")?;
+                tigerbeetle_setup::init_accounts(
+                    &tb_config.cluster_addresses,
+                    num_accounts,
+                    initial_balance,
+                )
+                .await?;
+            }
+        }
 
         let mut results = TestResults::new(self.config.clone(), num_runs);
 
@@ -56,8 +70,25 @@ impl TestRunner {
             results.add_run(run_result);
 
             // Verify balance correctness
-            let balance_ok =
-                postgres_setup::verify_total_balance(&self.docker, expected_total).await?;
+            let balance_ok = match self.config.database.kind {
+                DatabaseType::PostgreSQL => {
+                    postgres_setup::verify_total_balance(&self.docker, expected_total).await?
+                }
+                DatabaseType::TigerBeetle => {
+                    let tb_config = self
+                        .config
+                        .tigerbeetle
+                        .as_ref()
+                        .context("TigerBeetle config missing")?;
+                    tigerbeetle_setup::verify_total_balance(
+                        &tb_config.cluster_addresses,
+                        num_accounts,
+                        expected_total,
+                    )
+                    .await?
+                }
+            };
+
             if !balance_ok {
                 error!("Balance verification failed for run {}", run_id);
                 results.set_balance_error(run_id);
@@ -66,9 +97,38 @@ impl TestRunner {
             // Reset between runs (except last)
             if run_id < num_runs {
                 info!("Resetting database for next run...");
-                postgres_setup::reset_database(&self.docker, num_accounts, initial_balance).await?;
-                postgres_setup::checkpoint(&self.docker).await?;
-                postgres_setup::vacuum_analyze(&self.docker).await?;
+
+                match self.config.database.kind {
+                    DatabaseType::PostgreSQL => {
+                        postgres_setup::reset_database(&self.docker, num_accounts, initial_balance)
+                            .await?;
+                        postgres_setup::checkpoint(&self.docker).await?;
+                        postgres_setup::vacuum_analyze(&self.docker).await?;
+                    }
+                    DatabaseType::TigerBeetle => {
+                        // TigerBeetle requires container restart for clean state
+                        self.docker.restart_service("tigerbeetle").await?;
+                        self.docker
+                            .wait_for_tigerbeetle_services(Duration::from_secs(60))
+                            .await?;
+
+                        // Wait for TigerBeetle API to be ready (more reliable than port check)
+                        let tb_config = self
+                            .config
+                            .tigerbeetle
+                            .as_ref()
+                            .context("TigerBeetle config missing")?;
+                        tigerbeetle_setup::wait_for_ready(&tb_config.cluster_addresses, 60).await?;
+
+                        // Re-initialize accounts
+                        tigerbeetle_setup::init_accounts(
+                            &tb_config.cluster_addresses,
+                            num_accounts,
+                            initial_balance,
+                        )
+                        .await?;
+                    }
+                }
 
                 // Wait for system to stabilize
                 info!("Waiting 30s for system stabilization...");
@@ -107,18 +167,39 @@ impl TestRunner {
             .unwrap()
             .as_secs_f64();
 
+        // Build client arguments based on database type
+        let mut client_args = vec!["-c".to_string(), self.config_path.clone()];
+
+        match self.config.database.kind {
+            DatabaseType::PostgreSQL => {
+                client_args.extend([
+                    "--pg-host".to_string(),
+                    "localhost".to_string(),
+                    "--pg-port".to_string(),
+                    "5432".to_string(),
+                ]);
+            }
+            DatabaseType::TigerBeetle => {
+                let tb_config = self
+                    .config
+                    .tigerbeetle
+                    .as_ref()
+                    .context("TigerBeetle config missing")?;
+                client_args.extend([
+                    "--tb-addresses".to_string(),
+                    tb_config.cluster_addresses.join(","),
+                ]);
+            }
+        }
+
+        client_args.extend([
+            "--otel-endpoint".to_string(),
+            "http://localhost:4317".to_string(),
+        ]);
+
         // Spawn the client
         let mut child = Command::new(&client_binary)
-            .args([
-                "-c",
-                &self.config_path,
-                "--pg-host",
-                "localhost",
-                "--pg-port",
-                "5432",
-                "--otel-endpoint",
-                "http://localhost:4317",
-            ])
+            .args(&client_args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()

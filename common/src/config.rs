@@ -69,6 +69,16 @@ pub enum TestMode {
     },
 }
 
+impl TestMode {
+    /// Get the test mode as a string label for metrics
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TestMode::MaxThroughput { .. } => "max_throughput",
+            TestMode::FixedRate { .. } => "fixed_rate",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DatabaseConfig {
     #[serde(rename = "type")]
@@ -211,7 +221,9 @@ impl Config {
         // Validate workload configuration
         // Transfers require at least 2 accounts (source and destination must differ)
         if self.workload.num_accounts < 2 {
-            anyhow::bail!("num_accounts must be >= 2 (transfers require different source and destination)");
+            anyhow::bail!(
+                "num_accounts must be >= 2 (transfers require different source and destination)"
+            );
         }
 
         if self.workload.test_duration_secs == 0 {

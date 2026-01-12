@@ -1,5 +1,11 @@
+use crate::metrics::{TestPhase, WorkloadMetrics};
+use anyhow::Result;
 use rand::Rng;
 use rand_distr::{Distribution, Zipf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tracing::info;
 
 /// Generates account pairs for transfers using Zipfian distribution
 #[derive(Clone)]
@@ -77,6 +83,112 @@ pub mod sql_results {
     pub const SUCCESS: &str = "success";
     pub const INSUFFICIENT_BALANCE: &str = "insufficient_balance";
     pub const ACCOUNT_NOT_FOUND: &str = "account_not_found";
+}
+
+/// Controls test phase transitions (warmup -> measurement -> stop)
+///
+/// This controller manages the timing of benchmark phases and provides
+/// thread-safe flags for workers to check the current phase.
+pub struct PhaseController {
+    stop_flag: Arc<AtomicBool>,
+    phase_flag: Arc<AtomicBool>, // false = warmup, true = measurement
+    completed_count: Arc<AtomicU64>,
+    warmup_duration: Duration,
+    test_duration: Duration,
+}
+
+impl PhaseController {
+    pub fn new(warmup_duration: Duration, test_duration: Duration) -> Self {
+        Self {
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            phase_flag: Arc::new(AtomicBool::new(false)),
+            completed_count: Arc::new(AtomicU64::new(0)),
+            warmup_duration,
+            test_duration,
+        }
+    }
+
+    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+        self.stop_flag.clone()
+    }
+
+    pub fn phase_flag(&self) -> Arc<AtomicBool> {
+        self.phase_flag.clone()
+    }
+
+    pub fn completed_count(&self) -> Arc<AtomicU64> {
+        self.completed_count.clone()
+    }
+
+    /// Run the phase timing: warmup -> measurement -> stop
+    /// Returns (start_time, warmup_count) for stats calculation
+    pub async fn run_phases(&self) -> (Instant, u64) {
+        let start = Instant::now();
+        info!("Warmup phase started ({:?})", self.warmup_duration);
+
+        tokio::time::sleep(self.warmup_duration).await;
+
+        self.phase_flag.store(true, Ordering::Release);
+        let warmup_count = self.completed_count.load(Ordering::Relaxed);
+        info!(
+            "Measurement phase started ({:?}), warmup completed {} transfers",
+            self.test_duration, warmup_count
+        );
+
+        tokio::time::sleep(self.test_duration).await;
+
+        self.stop_flag.store(true, Ordering::Release);
+
+        (start, warmup_count)
+    }
+
+    /// Log final workload statistics
+    pub fn log_stats(&self, start: Instant, warmup_count: u64) {
+        let total_count = self.completed_count.load(Ordering::Relaxed);
+        let measurement_count = total_count - warmup_count;
+        let elapsed = start.elapsed();
+        let tps = measurement_count as f64 / self.test_duration.as_secs_f64();
+
+        info!(
+            "Workload completed: {} total transfers, {} in measurement phase ({:.2} TPS), elapsed {:?}",
+            total_count, measurement_count, tps, elapsed
+        );
+    }
+}
+
+/// Get the current test phase from the phase flag
+pub fn get_current_phase(phase_flag: &AtomicBool) -> TestPhase {
+    if phase_flag.load(Ordering::Relaxed) {
+        TestPhase::Measurement
+    } else {
+        TestPhase::Warmup
+    }
+}
+
+/// Record the result of a transfer operation to metrics
+///
+/// This helper centralizes the logic for recording transfer results,
+/// ensuring consistent behavior across PostgreSQL and TigerBeetle workloads.
+pub fn record_transfer_result(
+    result: &Result<TransferResult>,
+    latency_us: u64,
+    phase: &TestPhase,
+    metrics: &WorkloadMetrics,
+    completed_count: &Arc<AtomicU64>,
+) {
+    match result {
+        Ok(TransferResult::Success) => {
+            metrics.record_completed(latency_us, phase.as_str());
+            completed_count.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(TransferResult::InsufficientBalance) => {
+            metrics.record_rejected(latency_us, phase.as_str());
+            completed_count.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(TransferResult::AccountNotFound) | Ok(TransferResult::Failed) | Err(_) => {
+            metrics.record_failed(phase.as_str());
+        }
+    }
 }
 
 #[cfg(test)]

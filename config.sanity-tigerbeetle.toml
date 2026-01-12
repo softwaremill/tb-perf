@@ -1,15 +1,16 @@
-# Local TigerBeetle max_throughput test configuration
+# Sanity-check configuration for TigerBeetle
+# Quick 30-second test to verify setup works correctly
 
 [workload]
 test_mode = "max_throughput"
-concurrency = 10
-num_accounts = 100000
+concurrency = 4
+num_accounts = 1000
 zipfian_exponent = 1.0
 initial_balance = 1000000
 min_transfer_amount = 1
 max_transfer_amount = 1000
-warmup_duration_secs = 120
-test_duration_secs = 300
+warmup_duration_secs = 5
+test_duration_secs = 10
 
 [database]
 type = "tigerbeetle"
@@ -24,11 +25,11 @@ num_db_nodes = 1
 measure_network_latency = false
 
 [coordinator]
-test_runs = 3
+test_runs = 1
 max_variance_threshold = 0.10
 max_error_rate = 0.05
 metrics_export_path = "./results"
-keep_grafana_running = false
+keep_grafana_running = true
 
 [monitoring]
 # Note: TigerBeetle uses port 3000, so Grafana is on 3001

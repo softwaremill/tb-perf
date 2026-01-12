@@ -1,0 +1,78 @@
+version: "3.8"
+
+services:
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    container_name: tb-perf-tigerbeetle
+    ports:
+      - "3000:3000"
+    volumes:
+      - tigerbeetle_data:/data
+    # TigerBeetle requires data file to be formatted before first start
+    # The entrypoint script handles this
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        # Format data file if it doesn't exist
+        if [ ! -f /data/0_0.tigerbeetle ]; then
+          echo "Formatting TigerBeetle data file..."
+          /tigerbeetle format --cluster=0 --replica=0 --replica-count=1 /data/0_0.tigerbeetle
+        fi
+        # Start TigerBeetle
+        exec /tigerbeetle start --addresses=0.0.0.0:3000 /data/0_0.tigerbeetle
+    healthcheck:
+      # TigerBeetle's minimal image doesn't include nc or curl.
+      # We check process existence here; actual API readiness is verified by coordinator.
+      test: ["CMD-SHELL", "pgrep tigerbeetle || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: tb-perf-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8889:8889"   # Prometheus metrics exporter
+    depends_on:
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: tb-perf-prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: tb-perf-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "3001:3000"  # Different port to avoid conflict with TigerBeetle
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  tigerbeetle_data:
+  prometheus_data:
+  grafana_data:

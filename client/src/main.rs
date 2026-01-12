@@ -2,14 +2,16 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tb_perf_common::Config;
 use tb_perf_common::config::{DatabaseType, TestMode};
-use tracing::{info, warn};
+use tracing::info;
 
 mod metrics;
 mod postgres;
+mod tigerbeetle;
 mod workload;
 
 use metrics::WorkloadMetrics;
 use postgres::PostgresWorkload;
+use tigerbeetle::TigerBeetleWorkload;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +31,10 @@ struct Args {
     /// PostgreSQL port
     #[arg(long, default_value = "5432")]
     pg_port: u16,
+
+    /// TigerBeetle cluster addresses (comma-separated)
+    #[arg(long, default_value = "3000")]
+    tb_addresses: String,
 
     /// OpenTelemetry collector endpoint
     #[arg(long, default_value = "http://localhost:4317")]
@@ -63,7 +69,7 @@ async fn main() -> Result<()> {
             run_postgresql_workload(&config, &args).await?;
         }
         DatabaseType::TigerBeetle => {
-            run_tigerbeetle_workload(&config, args.instance_id).await?;
+            run_tigerbeetle_workload(&config, &args).await?;
         }
     }
 
@@ -83,10 +89,7 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
     info!("  Connection pool size: {}", pg_config.connection_pool_size);
 
     let test_mode = config.workload.test_mode()?;
-    let test_mode_str = match &test_mode {
-        TestMode::MaxThroughput { .. } => "max_throughput",
-        TestMode::FixedRate { .. } => "fixed_rate",
-    };
+    let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
     let metrics = WorkloadMetrics::new(&args.otel_endpoint, "postgresql", test_mode_str)
@@ -114,17 +117,11 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
 
     // Run workload based on test mode
     let result = match test_mode {
-        TestMode::MaxThroughput { concurrency } => {
-            workload.run_max_throughput(concurrency).await
-        }
+        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(concurrency).await,
         TestMode::FixedRate {
             target_rate,
             max_concurrency,
-        } => {
-            workload
-                .run_fixed_rate(target_rate, max_concurrency)
-                .await
-        }
+        } => workload.run_fixed_rate(target_rate, max_concurrency).await,
     };
 
     // Shutdown OpenTelemetry provider to flush remaining metrics
@@ -134,7 +131,7 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
     result
 }
 
-async fn run_tigerbeetle_workload(config: &Config, _instance_id: usize) -> Result<()> {
+async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
     info!("Running TigerBeetle workload");
 
     let tb_config = config
@@ -142,11 +139,50 @@ async fn run_tigerbeetle_workload(config: &Config, _instance_id: usize) -> Resul
         .as_ref()
         .context("TigerBeetle config missing (should have been validated)")?;
 
-    info!("  Cluster addresses: {:?}", tb_config.cluster_addresses);
+    // Use addresses from args (allows coordinator to override config)
+    let addresses: Vec<String> = args
+        .tb_addresses
+        .split(',')
+        .map(|s| s.to_string())
+        .collect();
+    info!("  Cluster addresses: {:?}", addresses);
     info!("  Measure batch sizes: {}", tb_config.measure_batch_sizes);
 
-    // TODO: Implement TigerBeetle workload
-    warn!("TigerBeetle workload not yet implemented");
+    let test_mode = config.workload.test_mode()?;
+    let test_mode_str = test_mode.as_str();
 
-    Ok(())
+    // Initialize metrics
+    let metrics = WorkloadMetrics::new(&args.otel_endpoint, "tigerbeetle", test_mode_str)
+        .context("Failed to initialize metrics")?;
+    let metrics_for_shutdown = metrics.clone();
+
+    // Create workload executor
+    let workload = TigerBeetleWorkload::new(
+        &addresses,
+        config.workload.num_accounts,
+        config.workload.zipfian_exponent,
+        config.workload.min_transfer_amount,
+        config.workload.max_transfer_amount,
+        config.workload.warmup_duration_secs,
+        config.workload.test_duration_secs,
+        tb_config.measure_batch_sizes,
+        metrics,
+    )
+    .await
+    .context("Failed to create TigerBeetle workload")?;
+
+    // Run workload based on test mode
+    let result = match test_mode {
+        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(concurrency).await,
+        TestMode::FixedRate {
+            target_rate,
+            max_concurrency,
+        } => workload.run_fixed_rate(target_rate, max_concurrency).await,
+    };
+
+    // Shutdown OpenTelemetry provider to flush remaining metrics
+    info!("Shutting down metrics provider...");
+    metrics_for_shutdown.shutdown();
+
+    result
 }
