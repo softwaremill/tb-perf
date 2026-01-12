@@ -42,24 +42,24 @@ Use sanity-check configurations to verify your setup works before running longer
 
 **PostgreSQL Sanity Check:**
 ```bash
-# Start the stack
-docker compose -f docker/docker-compose.postgresql.yml up -d
-
-# Wait for PostgreSQL to be ready (about 10 seconds)
-# Then run the sanity check
+# Option 1: Let coordinator manage Docker
 cargo run --release --bin coordinator -- -c config.sanity-postgresql.toml
+
+# Option 2: Start Docker manually, then run with --no-docker
+docker compose -f docker/docker-compose.postgresql.yml up -d
+cargo run --release --bin coordinator -- -c config.sanity-postgresql.toml --no-docker
 
 # View results in Grafana at http://localhost:3000
 ```
 
 **TigerBeetle Sanity Check:**
 ```bash
-# Start the stack
-docker compose -f docker/docker-compose.tigerbeetle.yml up -d
-
-# Wait for TigerBeetle to be ready (about 10 seconds)
-# Then run the sanity check
+# Option 1: Let coordinator manage Docker
 cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml
+
+# Option 2: Start Docker manually, then run with --no-docker
+docker compose -f docker/docker-compose.tigerbeetle.yml up -d
+cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml --no-docker
 
 # View results in Grafana at http://localhost:3001
 # (TigerBeetle uses port 3000, so Grafana is on 3001)
@@ -69,10 +69,8 @@ cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml
 
 **PostgreSQL Full Test:**
 ```bash
-# Start infrastructure
-docker compose -f docker/docker-compose.postgresql.yml up -d
-
 # Run the full test suite (takes ~25 minutes: 3 runs x (2min warmup + 5min test))
+# Coordinator automatically manages Docker
 cargo run --release --bin coordinator -- -c config.local-postgresql.toml
 
 # Results are exported to ./results/ as JSON
@@ -80,10 +78,8 @@ cargo run --release --bin coordinator -- -c config.local-postgresql.toml
 
 **TigerBeetle Full Test:**
 ```bash
-# Start infrastructure
-docker compose -f docker/docker-compose.tigerbeetle.yml up -d
-
 # Run the full test suite
+# Coordinator automatically manages Docker
 cargo run --release --bin coordinator -- -c config.local-tigerbeetle.toml
 
 # Results are exported to ./results/ as JSON
