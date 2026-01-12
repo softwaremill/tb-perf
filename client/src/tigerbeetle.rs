@@ -267,8 +267,8 @@ async fn execute_transfer(
     match client.create_transfers(vec![transfer]).await {
         Ok(()) => Ok(TransferResult::Success),
         Err(CreateTransfersError::Api(api_err)) => {
-            // Check the specific error
-            for err in api_err.as_slice() {
+            // Check the first error (single transfer = single error)
+            if let Some(err) = api_err.as_slice().first() {
                 match err.kind() {
                     CreateTransferErrorKind::ExceedsCredits
                     | CreateTransferErrorKind::ExceedsDebits => {

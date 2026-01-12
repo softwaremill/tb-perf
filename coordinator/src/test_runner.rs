@@ -4,13 +4,15 @@ use crate::prometheus::PrometheusClient;
 use crate::results::{RunResult, TestResults};
 use crate::tigerbeetle_setup;
 use anyhow::{Context, Result};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tb_perf_common::Config;
 use tb_perf_common::config::DatabaseType;
 use tokio::process::Command;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Runs the test orchestration for local tests
 pub struct TestRunner {
@@ -157,8 +159,9 @@ impl TestRunner {
 
         let start_time = Instant::now();
 
-        // Find the client binary
+        // Find the client binary and validate it
         let client_binary = find_client_binary()?;
+        validate_client_binary(&client_binary)?;
         info!("Using client binary: {}", client_binary);
 
         // Record spawn time as Unix timestamp for Prometheus queries
@@ -197,11 +200,11 @@ impl TestRunner {
             "http://localhost:4317".to_string(),
         ]);
 
-        // Spawn the client
+        // Spawn the client with inherited stdout/stderr so output flows directly to terminal
         let mut child = Command::new(&client_binary)
             .args(&client_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .context("Failed to spawn client binary")?;
 
@@ -225,7 +228,23 @@ impl TestRunner {
                     info!("Client completed successfully in {:?}", elapsed);
                     true
                 } else {
-                    warn!("Client exited with status: {}", status);
+                    error!("Client exited with status: {}", status);
+                    // Log hint for common exit codes
+                    if let Some(code) = status.code() {
+                        match code {
+                            126 => error!(
+                                "Exit code 126: Permission denied or binary not executable. \
+                                Check that {} has execute permission.",
+                                client_binary
+                            ),
+                            127 => error!(
+                                "Exit code 127: Command not found. \
+                                Check that {} exists.",
+                                client_binary
+                            ),
+                            _ => {}
+                        }
+                    }
                     false
                 }
             }
@@ -293,12 +312,12 @@ impl TestRunner {
 
 /// Find the client binary
 fn find_client_binary() -> Result<String> {
-    // Check common locations
+    // Check common locations - prefer release builds
     let candidates = [
-        "./target/debug/client",
         "./target/release/client",
-        "target/debug/client",
         "target/release/client",
+        "./target/debug/client",
+        "target/debug/client",
     ];
 
     for candidate in candidates {
@@ -307,9 +326,46 @@ fn find_client_binary() -> Result<String> {
         }
     }
 
-    // Try to find via cargo
     anyhow::bail!(
-        "Client binary not found. Please run 'cargo build' first. Checked: {:?}",
+        "Client binary not found. Please run 'cargo build --release' first. Checked: {:?}",
         candidates
     )
+}
+
+/// Validate that the client binary is executable
+fn validate_client_binary(path: &str) -> Result<()> {
+    let path = Path::new(path);
+
+    // Check if file exists
+    if !path.exists() {
+        anyhow::bail!("Client binary does not exist: {}", path.display());
+    }
+
+    // Check if it's a file (not a directory)
+    if !path.is_file() {
+        anyhow::bail!("Client binary path is not a file: {}", path.display());
+    }
+
+    // Check execute permission
+    let metadata = fs::metadata(path).context("Failed to read binary metadata")?;
+    let permissions = metadata.permissions();
+    let mode = permissions.mode();
+
+    if mode & 0o111 == 0 {
+        anyhow::bail!(
+            "Client binary is not executable: {}. Run: chmod +x {}",
+            path.display(),
+            path.display()
+        );
+    }
+
+    // Log binary info for debugging
+    debug!(
+        "Client binary validated: {} (size: {} bytes, mode: {:o})",
+        path.display(),
+        metadata.len(),
+        mode
+    );
+
+    Ok(())
 }

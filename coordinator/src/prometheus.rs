@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::time::Duration;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Client for querying Prometheus metrics
 pub struct PrometheusClient {
@@ -109,10 +109,9 @@ impl PrometheusClient {
             "sum(increase({}{{phase=\"measurement\"}}[{}]))",
             metric, range
         );
-        Ok(self
-            .query_at(&query, query_time)
-            .await?
-            .map(|v| v.round() as u64))
+        let result = self.query_at(&query, query_time).await?;
+        debug!("Counter query '{}': {:?}", metric, result);
+        Ok(result.map(|v| v.round() as u64))
     }
 
     /// Query a histogram metric for a specific quantile
@@ -148,14 +147,14 @@ impl PrometheusClient {
         // capture data from when the client was definitely running
         const TOLERANCE_SECS: f64 = 2.0;
         let query_start = measurement_start + TOLERANCE_SECS;
-        let query_end = measurement_end - TOLERANCE_SECS;
-        let range_secs = (query_end - query_start).max(1.0);
+        let query_time = measurement_end - TOLERANCE_SECS;
+        let range_secs = (query_time - query_start).max(1.0);
         let range = format!("{}s", range_secs.round() as u64);
 
-        debug!(
-            "Querying metrics: range={}s, query_time={}",
+        info!(
+            "Querying metrics: range={}s, query_time={:.0}",
             range_secs.round(),
-            query_end
+            query_time
         );
 
         // Metric names include tbperf_ prefix from OTel collector namespace config
@@ -165,43 +164,46 @@ impl PrometheusClient {
         const LATENCY: &str = "tbperf_transfer_latency_us";
 
         // Query counters
-        if let Some(v) = self.query_counter(COMPLETED, &range, query_end).await? {
+        if let Some(v) = self.query_counter(COMPLETED, &range, query_time).await? {
             metrics.completed_transfers = v;
         }
-        if let Some(v) = self.query_counter(REJECTED, &range, query_end).await? {
+        if let Some(v) = self.query_counter(REJECTED, &range, query_time).await? {
             metrics.rejected_transfers = v;
         }
-        if let Some(v) = self.query_counter(FAILED, &range, query_end).await? {
+        if let Some(v) = self.query_counter(FAILED, &range, query_time).await? {
             metrics.failed_transfers = v;
         }
 
         // Query latency percentiles
         if let Some(v) = self
-            .query_histogram_quantile(LATENCY, 0.50, &range, query_end)
+            .query_histogram_quantile(LATENCY, 0.50, &range, query_time)
             .await?
         {
             metrics.latency_p50_us = v;
         }
         if let Some(v) = self
-            .query_histogram_quantile(LATENCY, 0.95, &range, query_end)
+            .query_histogram_quantile(LATENCY, 0.95, &range, query_time)
             .await?
         {
             metrics.latency_p95_us = v;
         }
         if let Some(v) = self
-            .query_histogram_quantile(LATENCY, 0.99, &range, query_end)
+            .query_histogram_quantile(LATENCY, 0.99, &range, query_time)
             .await?
         {
             metrics.latency_p99_us = v;
         }
         if let Some(v) = self
-            .query_histogram_quantile(LATENCY, 0.999, &range, query_end)
+            .query_histogram_quantile(LATENCY, 0.999, &range, query_time)
             .await?
         {
             metrics.latency_p999_us = v;
         }
 
-        debug!("Collected metrics: {:?}", metrics);
+        info!(
+            "Collected metrics: completed={}, rejected={}, failed={}",
+            metrics.completed_transfers, metrics.rejected_transfers, metrics.failed_transfers
+        );
         Ok(metrics)
     }
 }
