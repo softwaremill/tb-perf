@@ -89,10 +89,13 @@ cargo run --release --bin coordinator -- -c config.local-tigerbeetle.toml
 
 ```bash
 # Stop PostgreSQL stack
-docker compose -f docker/docker-compose.postgresql.yml down -v
+./scripts/stop-docker.sh postgresql
 
 # Stop TigerBeetle stack
-docker compose -f docker/docker-compose.tigerbeetle.yml down -v
+./scripts/stop-docker.sh tigerbeetle
+
+# Stop both stacks
+./scripts/stop-docker.sh all
 ```
 
 ### Keep Grafana Running After Test
