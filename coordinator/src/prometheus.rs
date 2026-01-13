@@ -24,7 +24,6 @@ struct PrometheusData {
 
 #[derive(Debug, Deserialize)]
 struct PrometheusResult {
-    _metric: serde_json::Value,
     value: (f64, String), // [timestamp, value]
 }
 
@@ -109,8 +108,19 @@ impl PrometheusClient {
             "sum(increase({}{{phase=\"measurement\"}}[{}]))",
             metric, range
         );
+        info!("Prometheus query: {}", query);
         let result = self.query_at(&query, query_time).await?;
-        debug!("Counter query '{}': {:?}", metric, result);
+        if result.is_none() {
+            // Try without phase filter to see if metric exists at all
+            let debug_query = format!("sum(increase({}[{}]))", metric, range);
+            let debug_result = self.query_at(&debug_query, query_time).await?;
+            if debug_result.is_some() {
+                warn!(
+                    "Metric {} exists but has no phase=\"measurement\" label (got {:?} without filter)",
+                    metric, debug_result
+                );
+            }
+        }
         Ok(result.map(|v| v.round() as u64))
     }
 
@@ -131,30 +141,39 @@ impl PrometheusClient {
 
     /// Collect all metrics for a test run
     ///
-    /// Queries metrics for the precise time window when the client was running,
-    /// with a small tolerance (2s) on each end to account for timing variations.
+    /// Queries Prometheus at the current time with a range covering from measurement
+    /// start to now. The `phase="measurement"` label filter ensures only measurement
+    /// phase data is counted (not warmup or quiet period).
     ///
     /// - `measurement_start`: Unix timestamp when measurement phase began
-    /// - `measurement_end`: Unix timestamp when client finished
+    /// - `measurement_end`: Unix timestamp when client finished (used for logging)
     pub async fn collect_metrics(
         &self,
         measurement_start: f64,
         measurement_end: f64,
     ) -> Result<CollectedMetrics> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
         let mut metrics = CollectedMetrics::default();
 
-        // Apply tolerance: shrink window by 2s on each side to ensure we only
-        // capture data from when the client was definitely running
-        const TOLERANCE_SECS: f64 = 2.0;
-        let query_start = measurement_start + TOLERANCE_SECS;
-        let query_time = measurement_end - TOLERANCE_SECS;
-        let range_secs = (query_time - query_start).max(1.0);
+        // Query at current time (after waiting for metrics to be scraped)
+        // The phase="measurement" filter ensures we only count measurement data
+        let query_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        // Use a range that covers from measurement start to now
+        // This ensures we capture all scraped samples
+        let range_secs = (query_time - measurement_start + 5.0).max(15.0);
         let range = format!("{}s", range_secs.round() as u64);
 
         info!(
-            "Querying metrics: range={}s, query_time={:.0}",
+            "Querying metrics: range={}s, query_time={:.0} (measurement was {:.0} to {:.0})",
             range_secs.round(),
-            query_time
+            query_time,
+            measurement_start,
+            measurement_end
         );
 
         // Metric names include tbperf_ prefix from OTel collector namespace config
