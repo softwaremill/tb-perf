@@ -91,7 +91,9 @@ pub mod sql_results {
 /// thread-safe flags for workers to check the current phase.
 pub struct PhaseController {
     stop_flag: Arc<AtomicBool>,
-    phase_flag: Arc<AtomicBool>, // false = warmup, true = measurement
+    /// Current phase: false = Warmup, true = Measurement
+    /// Use get_current_phase() to convert to TestPhase enum
+    phase_flag: Arc<AtomicBool>,
     completed_count: Arc<AtomicU64>,
     warmup_duration: Duration,
     test_duration: Duration,

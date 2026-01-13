@@ -119,7 +119,7 @@ impl PostgresWorkload {
             let count = phase_ctrl.completed_count();
 
             handles.push(tokio::spawn(async move {
-                run_worker(
+                max_throughput_worker(
                     worker_id,
                     pool,
                     isolation_level,
@@ -256,8 +256,8 @@ impl PostgresWorkload {
     }
 }
 
-/// Worker task for max_throughput mode
-async fn run_worker(
+/// Worker task for max_throughput mode - runs transfers as fast as possible
+async fn max_throughput_worker(
     worker_id: usize,
     pool: Pool,
     isolation_level: IsolationLevel,

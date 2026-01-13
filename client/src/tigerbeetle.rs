@@ -82,7 +82,7 @@ impl TigerBeetleWorkload {
             let count = phase_ctrl.completed_count();
 
             handles.push(tokio::spawn(async move {
-                run_worker(
+                max_throughput_worker(
                     worker_id,
                     client,
                     account_selector,
@@ -212,8 +212,8 @@ impl TigerBeetleWorkload {
     }
 }
 
-/// Worker task for max_throughput mode
-async fn run_worker(
+/// Worker task for max_throughput mode - runs transfers as fast as possible
+async fn max_throughput_worker(
     worker_id: usize,
     client: Arc<tb::Client>,
     account_selector: AccountSelector,
