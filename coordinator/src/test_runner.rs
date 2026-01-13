@@ -53,8 +53,7 @@ impl<'a> TestRunner<'a> {
         // Initialize database based on type
         match self.config.database.kind {
             DatabaseType::PostgreSQL => {
-                postgres_setup::init_accounts(&self.docker, num_accounts, initial_balance).await?;
-                postgres_setup::vacuum_analyze(&self.docker).await?;
+                postgres_setup::reset_database(&self.docker, num_accounts, initial_balance).await?;
             }
             DatabaseType::TigerBeetle => {
                 let tb_config = self
@@ -112,8 +111,6 @@ impl<'a> TestRunner<'a> {
                     DatabaseType::PostgreSQL => {
                         postgres_setup::reset_database(&self.docker, num_accounts, initial_balance)
                             .await?;
-                        postgres_setup::checkpoint(&self.docker).await?;
-                        postgres_setup::vacuum_analyze(&self.docker).await?;
                     }
                     DatabaseType::TigerBeetle => {
                         // TigerBeetle requires container restart for clean state
@@ -208,54 +205,36 @@ impl<'a> TestRunner<'a> {
             "http://localhost:4317".to_string(),
         ]);
 
-        // Spawn the client with piped output so we can capture it
-        let child = Command::new(&client_binary)
+        // Create log file for client output
+        let log_file = std::fs::File::create(&self.run_ctx.client_log_path)
+            .context("Failed to create client log file")?;
+        let log_file_err = log_file.try_clone().context("Failed to clone log file")?;
+
+        // Spawn the client with output redirected to log file
+        let mut child = Command::new(&client_binary)
             .args(&client_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_err))
             .spawn()
             .context("Failed to spawn client binary")?;
 
         info!("Client started, waiting for completion...");
 
-        // Wait for client to complete (with timeout) and capture output
+        // Wait for client to complete (with timeout)
         let timeout = Duration::from_secs(total_duration + 60); // Add buffer
-        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+        let result = tokio::time::timeout(timeout, child.wait()).await;
 
         let elapsed = start_time.elapsed();
 
-        // Record end time as Unix timestamp
-        let end_unix_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs_f64();
-
         let client_success = match result {
-            Ok(Ok(output)) => {
-                // Save client output to log file
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let combined = format!(
-                    "=== Client stdout ===\n{}\n=== Client stderr ===\n{}",
-                    stdout, stderr
-                );
-
-                if let Err(e) = self.run_ctx.append_client_log(&combined) {
-                    warn!("Failed to save client log: {:?}", e);
-                }
-
-                // Also print stderr to coordinator output (contains tracing logs)
-                for line in stderr.lines() {
-                    info!("[client] {}", line);
-                }
-
-                if output.status.success() {
+            Ok(Ok(status)) => {
+                if status.success() {
                     info!("Client completed successfully in {:?}", elapsed);
                     true
                 } else {
-                    error!("Client exited with status: {}", output.status);
+                    error!("Client exited with status: {}", status);
                     // Log hint for common exit codes
-                    if let Some(code) = output.status.code() {
+                    if let Some(code) = status.code() {
                         match code {
                             126 => error!(
                                 "Exit code 126: Permission denied or binary not executable. \
@@ -279,6 +258,8 @@ impl<'a> TestRunner<'a> {
             }
             Err(_) => {
                 error!("Client timed out after {:?}", timeout);
+                // Kill the process on timeout
+                let _ = child.kill().await;
                 false
             }
         };
@@ -288,14 +269,13 @@ impl<'a> TestRunner<'a> {
         info!("Waiting for metrics to be available...");
         tokio::time::sleep(Duration::from_secs(15)).await;
 
-        // Calculate measurement window (after warmup, before client exit)
+        // Calculate measurement window start (after warmup)
         let measurement_start = spawn_unix_time + warmup_duration as f64;
-        let measurement_end = end_unix_time;
 
         // Query metrics from Prometheus for the measurement window
         let metrics = match self
             .prometheus
-            .collect_metrics(measurement_start, measurement_end)
+            .collect_metrics(measurement_start)
             .await
         {
             Ok(m) => {

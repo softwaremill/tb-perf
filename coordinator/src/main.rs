@@ -135,11 +135,11 @@ async fn run_local_tests(config: &Config, args: &Args, run_ctx: &RunContext) -> 
     results.print_summary();
     results.export_json(run_ctx.results_path().to_str().unwrap())?;
 
-    // Capture docker logs
-    if !args.no_docker
-        && let Ok(logs) = docker.get_logs().await
-    {
-        run_ctx.write_docker_log(&logs)?;
+    // Save docker logs directly to file
+    if !args.no_docker {
+        if let Err(e) = docker.save_logs_to_file(&run_ctx.docker_log_path).await {
+            warn!("Failed to save docker logs: {:?}", e);
+        }
     }
 
     // Cleanup

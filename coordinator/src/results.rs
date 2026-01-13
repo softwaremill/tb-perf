@@ -251,3 +251,152 @@ impl TestResults {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tb_perf_common::config::{
+        CoordinatorConfig, DatabaseConfig, DatabaseType, DeploymentConfig, DeploymentType,
+        MonitoringConfig, WorkloadConfig,
+    };
+
+    fn make_test_config() -> Config {
+        Config {
+            workload: WorkloadConfig {
+                test_mode: "max_throughput".to_string(),
+                concurrency: Some(10),
+                target_rate: None,
+                max_concurrency: None,
+                num_accounts: 1000,
+                zipfian_exponent: 1.0,
+                initial_balance: 10000,
+                min_transfer_amount: 1,
+                max_transfer_amount: 100,
+                warmup_duration_secs: 5,
+                test_duration_secs: 30,
+            },
+            database: DatabaseConfig {
+                kind: DatabaseType::PostgreSQL,
+            },
+            postgresql: None,
+            tigerbeetle: None,
+            deployment: DeploymentConfig {
+                kind: DeploymentType::Local,
+                num_db_nodes: 1,
+                num_client_nodes: None,
+                aws_region: None,
+                db_instance_type: None,
+                client_instance_type: None,
+                measure_network_latency: false,
+            },
+            coordinator: CoordinatorConfig {
+                test_runs: 1,
+                max_variance_threshold: 0.1,
+                max_error_rate: 0.05,
+                metrics_export_path: "./results".to_string(),
+                keep_grafana_running: false,
+            },
+            monitoring: MonitoringConfig {
+                grafana_port: 3000,
+                prometheus_port: 9090,
+                otel_collector_port: 4317,
+            },
+        }
+    }
+
+    #[test]
+    fn test_aggregate_stats_empty() {
+        let stats = AggregateStats::from_values(&[]);
+        assert_eq!(stats.mean, 0.0);
+        assert_eq!(stats.stddev, 0.0);
+        assert_eq!(stats.cv, 0.0);
+        assert_eq!(stats.min, 0.0);
+        assert_eq!(stats.max, 0.0);
+    }
+
+    #[test]
+    fn test_aggregate_stats_single_value() {
+        let stats = AggregateStats::from_values(&[100.0]);
+        assert_eq!(stats.mean, 100.0);
+        assert_eq!(stats.stddev, 0.0);
+        assert_eq!(stats.cv, 0.0);
+        assert_eq!(stats.min, 100.0);
+        assert_eq!(stats.max, 100.0);
+    }
+
+    #[test]
+    fn test_aggregate_stats_multiple_values() {
+        let stats = AggregateStats::from_values(&[10.0, 20.0, 30.0]);
+        assert_eq!(stats.mean, 20.0);
+        assert_eq!(stats.min, 10.0);
+        assert_eq!(stats.max, 30.0);
+        // stddev of [10, 20, 30] = sqrt(((10-20)^2 + (20-20)^2 + (30-20)^2) / 3) = sqrt(200/3) ≈ 8.165
+        assert!((stats.stddev - 8.165).abs() < 0.01);
+        // cv = stddev / mean = 8.165 / 20 ≈ 0.408
+        assert!((stats.cv - 0.408).abs() < 0.01);
+    }
+
+    fn make_run_result(run_id: usize, tps: f64, completed: u64, failed: u64) -> RunResult {
+        RunResult {
+            run_id,
+            duration_secs: 10.0,
+            throughput_tps: tps,
+            latency_p50_us: 100,
+            latency_p95_us: 200,
+            latency_p99_us: 300,
+            latency_p999_us: 400,
+            completed_transfers: completed,
+            rejected_transfers: 0,
+            failed_transfers: failed,
+            balance_verified: true,
+        }
+    }
+
+    #[test]
+    fn test_calculate_aggregates_empty() {
+        let config = make_test_config();
+        let mut results = TestResults::new(config, 0);
+        results.calculate_aggregates();
+        assert!(results.aggregate.is_none());
+    }
+
+    #[test]
+    fn test_calculate_aggregates_single_run() {
+        let config = make_test_config();
+        let mut results = TestResults::new(config, 1);
+        results.add_run(make_run_result(1, 1000.0, 10000, 0));
+        results.calculate_aggregates();
+
+        let agg = results.aggregate.unwrap();
+        assert_eq!(agg.throughput.mean, 1000.0);
+        assert_eq!(agg.total_completed, 10000);
+        assert_eq!(agg.error_rate, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_aggregates_error_rate() {
+        let config = make_test_config();
+        let mut results = TestResults::new(config, 1);
+        results.add_run(make_run_result(1, 1000.0, 900, 100));
+        results.calculate_aggregates();
+
+        let agg = results.aggregate.unwrap();
+        assert_eq!(agg.total_completed, 900);
+        assert_eq!(agg.total_failed, 100);
+        assert!((agg.error_rate - 0.1).abs() < 0.001); // 100 / 1000 = 10%
+    }
+
+    #[test]
+    fn test_high_variance_warning() {
+        let config = make_test_config();
+        let mut results = TestResults::new(config, 3);
+        // High variance: 100, 200, 300 -> CV > 10%
+        results.add_run(make_run_result(1, 100.0, 1000, 0));
+        results.add_run(make_run_result(2, 200.0, 2000, 0));
+        results.add_run(make_run_result(3, 300.0, 3000, 0));
+        results.calculate_aggregates();
+
+        assert!(!results.warnings.is_empty());
+        assert!(results.warnings[0].contains("throughput variance"));
+    }
+}

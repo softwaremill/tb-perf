@@ -17,8 +17,6 @@ struct PrometheusResponse {
 
 #[derive(Debug, Deserialize)]
 struct PrometheusData {
-    #[serde(rename = "resultType")]
-    _result_type: String,
     result: Vec<PrometheusResult>,
 }
 
@@ -37,6 +35,22 @@ pub struct CollectedMetrics {
     pub latency_p95_us: u64,
     pub latency_p99_us: u64,
     pub latency_p999_us: u64,
+}
+
+impl std::fmt::Display for CollectedMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "completed={}, rejected={}, failed={}, latency_us(p50={}, p95={}, p99={}, p999={})",
+            self.completed_transfers,
+            self.rejected_transfers,
+            self.failed_transfers,
+            self.latency_p50_us,
+            self.latency_p95_us,
+            self.latency_p99_us,
+            self.latency_p999_us
+        )
+    }
 }
 
 impl PrometheusClient {
@@ -146,11 +160,9 @@ impl PrometheusClient {
     /// phase data is counted (not warmup or quiet period).
     ///
     /// - `measurement_start`: Unix timestamp when measurement phase began
-    /// - `measurement_end`: Unix timestamp when client finished (used for logging)
     pub async fn collect_metrics(
         &self,
         measurement_start: f64,
-        measurement_end: f64,
     ) -> Result<CollectedMetrics> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -163,17 +175,15 @@ impl PrometheusClient {
             .unwrap()
             .as_secs_f64();
 
-        // Use a range that covers from measurement start to now
-        // This ensures we capture all scraped samples
-        let range_secs = (query_time - measurement_start + 5.0).max(15.0);
+        // Range covers from measurement start to now, plus 5s buffer for scrape timing.
+        // This is always >= measurement duration since we're called after the client finishes.
+        let range_secs = query_time - measurement_start + 5.0;
         let range = format!("{}s", range_secs.round() as u64);
 
         info!(
-            "Querying metrics: range={}s, query_time={:.0} (measurement was {:.0} to {:.0})",
+            "Querying metrics: range={}s, query_time={:.0}",
             range_secs.round(),
-            query_time,
-            measurement_start,
-            measurement_end
+            query_time
         );
 
         // Metric names include tbperf_ prefix from OTel collector namespace config
@@ -219,10 +229,7 @@ impl PrometheusClient {
             metrics.latency_p999_us = v;
         }
 
-        info!(
-            "Collected metrics: completed={}, rejected={}, failed={}",
-            metrics.completed_transfers, metrics.rejected_transfers, metrics.failed_transfers
-        );
+        info!("Collected metrics: {}", metrics);
         Ok(metrics)
     }
 }

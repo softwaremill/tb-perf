@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
@@ -46,26 +45,6 @@ impl RunContext {
         fs::copy(source_path, &self.config_path)
             .with_context(|| format!("Failed to copy config to {}", self.config_path.display()))?;
         info!("Config copied to: {}", self.config_path.display());
-        Ok(())
-    }
-
-    /// Append content to the client log file
-    pub fn append_client_log(&self, content: &str) -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.client_log_path)
-            .with_context(|| format!("Failed to open {}", self.client_log_path.display()))?;
-        file.write_all(content.as_bytes())?;
-        Ok(())
-    }
-
-    /// Write content to the docker log file
-    pub fn write_docker_log(&self, content: &str) -> Result<()> {
-        let mut file = File::create(&self.docker_log_path)
-            .with_context(|| format!("Failed to create {}", self.docker_log_path.display()))?;
-        file.write_all(content.as_bytes())?;
-        info!("Docker logs saved to: {}", self.docker_log_path.display());
         Ok(())
     }
 

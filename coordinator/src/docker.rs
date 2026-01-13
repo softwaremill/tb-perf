@@ -245,9 +245,13 @@ impl DockerManager {
         Ok(())
     }
 
-    /// Get logs from all containers
-    pub async fn get_logs(&self) -> Result<String> {
-        let output = Command::new("docker")
+    /// Save logs from all containers directly to a file
+    pub async fn save_logs_to_file(&self, path: &std::path::Path) -> Result<()> {
+        let log_file =
+            std::fs::File::create(path).context("Failed to create docker log file")?;
+        let log_file_err = log_file.try_clone().context("Failed to clone log file")?;
+
+        let status = Command::new("docker")
             .args([
                 "compose",
                 "-f",
@@ -257,16 +261,17 @@ impl DockerManager {
                 "logs",
                 "--no-color",
             ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(log_file_err))
+            .status()
             .await
             .context("Failed to get docker logs")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !status.success() {
+            anyhow::bail!("docker compose logs failed with status: {}", status);
+        }
 
-        Ok(format!("{}{}", stdout, stderr))
+        Ok(())
     }
 
     /// Execute a command in the postgres container

@@ -2,18 +2,20 @@ use crate::docker::DockerManager;
 use anyhow::{Context, Result};
 use tracing::info;
 
-/// Initialize accounts in PostgreSQL
-pub async fn init_accounts(
+/// Reset database to initial state with consistent conditions.
+/// Used for both initial setup and between-run resets.
+/// Ensures each run starts with identical conditions (checkpoint + vacuum analyze).
+pub async fn reset_database(
     docker: &DockerManager,
     num_accounts: u64,
     initial_balance: u64,
 ) -> Result<()> {
     info!(
-        "Initializing {} accounts with balance {}",
+        "Resetting database: {} accounts with balance {}",
         num_accounts, initial_balance
     );
 
-    // Clear existing data and insert accounts
+    // Truncate and re-initialize accounts
     let sql = format!(
         "TRUNCATE transfers, accounts CASCADE; \
          INSERT INTO accounts (id, balance) \
@@ -24,20 +26,14 @@ pub async fn init_accounts(
     docker
         .exec_postgres(&sql)
         .await
-        .context("Failed to initialize accounts")?;
+        .context("Failed to reset accounts")?;
 
-    info!("Accounts initialized successfully");
+    // Flush WAL and update statistics for consistent conditions
+    checkpoint(docker).await?;
+    vacuum_analyze(docker).await?;
+
+    info!("Database reset complete");
     Ok(())
-}
-
-/// Reset database between test runs (truncate and re-initialize)
-pub async fn reset_database(
-    docker: &DockerManager,
-    num_accounts: u64,
-    initial_balance: u64,
-) -> Result<()> {
-    info!("Resetting database for next run");
-    init_accounts(docker, num_accounts, initial_balance).await
 }
 
 /// Verify total balance for correctness checking
@@ -70,7 +66,7 @@ pub async fn verify_total_balance(docker: &DockerManager, expected_total: u64) -
 }
 
 /// Run VACUUM ANALYZE for optimal performance
-pub async fn vacuum_analyze(docker: &DockerManager) -> Result<()> {
+async fn vacuum_analyze(docker: &DockerManager) -> Result<()> {
     info!("Running VACUUM ANALYZE...");
 
     docker
@@ -83,7 +79,7 @@ pub async fn vacuum_analyze(docker: &DockerManager) -> Result<()> {
 }
 
 /// Run CHECKPOINT to flush WAL
-pub async fn checkpoint(docker: &DockerManager) -> Result<()> {
+async fn checkpoint(docker: &DockerManager) -> Result<()> {
     info!("Running CHECKPOINT...");
 
     docker
