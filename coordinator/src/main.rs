@@ -4,15 +4,19 @@ use std::time::Duration;
 use tb_perf_common::Config;
 use tb_perf_common::config::{DatabaseType, DeploymentType};
 use tracing::{info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 mod docker;
 mod postgres_setup;
 mod prometheus;
 mod results;
+mod run_context;
 mod test_runner;
 mod tigerbeetle_setup;
 
 use docker::{DockerManager, find_compose_file};
+use run_context::RunContext;
 use test_runner::TestRunner;
 
 #[derive(Parser, Debug)]
@@ -33,19 +37,37 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::INFO.into()),
-        )
+    let args = Args::parse();
+
+    // Load configuration first (before logging setup, so we know the output path)
+    let config = Config::from_file(&args.config)?;
+
+    // Create run context with dedicated directory for this run's logs
+    let run_ctx = RunContext::new(&config.coordinator.metrics_export_path)?;
+
+    // Set up dual logging: file + stdout
+    let file = std::fs::File::create(run_ctx.coordinator_log_path())?;
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(file);
+
+    let stdout_layer = tracing_subscriber::fmt::layer().with_writer(std::io::stdout);
+
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::INFO.into());
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(file_layer)
+        .with(stdout_layer)
         .init();
 
-    let args = Args::parse();
+    info!("Run directory: {}", run_ctx.run_dir.display());
     info!("Loading configuration from: {}", args.config);
 
-    // Load configuration
-    let config = Config::from_file(&args.config)?;
+    // Copy config to run directory
+    run_ctx.copy_config(&args.config)?;
+
     info!("Configuration loaded successfully");
     info!("Deployment type: {:?}", config.deployment.kind);
     info!("Database type: {:?}", config.database.kind);
@@ -56,7 +78,7 @@ async fn main() -> Result<()> {
 
     match config.deployment.kind {
         DeploymentType::Local => {
-            run_local_tests(&config, &args).await?;
+            run_local_tests(&config, &args, &run_ctx).await?;
         }
         DeploymentType::Cloud => {
             run_cloud_tests(&config).await?;
@@ -64,10 +86,11 @@ async fn main() -> Result<()> {
     }
 
     info!("Test coordinator finished");
+    info!("Results saved to: {}", run_ctx.run_dir.display());
     Ok(())
 }
 
-async fn run_local_tests(config: &Config, args: &Args) -> Result<()> {
+async fn run_local_tests(config: &Config, args: &Args, run_ctx: &RunContext) -> Result<()> {
     info!("Running local tests");
     info!("  Test runs: {}", config.coordinator.test_runs);
     info!(
@@ -105,18 +128,19 @@ async fn run_local_tests(config: &Config, args: &Args) -> Result<()> {
     }
 
     // Run tests
-    let runner = TestRunner::new(config.clone(), args.config.clone(), docker.clone());
+    let runner = TestRunner::new(config.clone(), args.config.clone(), docker.clone(), run_ctx);
     let results = runner.run().await?;
 
     // Print and export results
     results.print_summary();
+    results.export_json(run_ctx.results_path().to_str().unwrap())?;
 
-    let output_path = format!(
-        "{}/results_{}.json",
-        config.coordinator.metrics_export_path,
-        chrono::Utc::now().format("%Y%m%d_%H%M%S")
-    );
-    results.export_json(&output_path)?;
+    // Capture docker logs
+    if !args.no_docker
+        && let Ok(logs) = docker.get_logs().await
+    {
+        run_ctx.write_docker_log(&logs)?;
+    }
 
     // Cleanup
     let keep_running = args.keep_running || config.coordinator.keep_grafana_running;

@@ -2,6 +2,7 @@ use crate::docker::DockerManager;
 use crate::postgres_setup;
 use crate::prometheus::PrometheusClient;
 use crate::results::{RunResult, TestResults};
+use crate::run_context::RunContext;
 use crate::tigerbeetle_setup;
 use anyhow::{Context, Result};
 use std::fs;
@@ -15,21 +16,28 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 /// Runs the test orchestration for local tests
-pub struct TestRunner {
+pub struct TestRunner<'a> {
     config: Config,
     config_path: String,
     docker: DockerManager,
     prometheus: PrometheusClient,
+    run_ctx: &'a RunContext,
 }
 
-impl TestRunner {
-    pub fn new(config: Config, config_path: String, docker: DockerManager) -> Self {
+impl<'a> TestRunner<'a> {
+    pub fn new(
+        config: Config,
+        config_path: String,
+        docker: DockerManager,
+        run_ctx: &'a RunContext,
+    ) -> Self {
         let prometheus_url = format!("http://localhost:{}", config.monitoring.prometheus_port);
         Self {
             config,
             config_path,
             docker,
             prometheus: PrometheusClient::new(&prometheus_url),
+            run_ctx,
         }
     }
 
@@ -200,19 +208,19 @@ impl TestRunner {
             "http://localhost:4317".to_string(),
         ]);
 
-        // Spawn the client with inherited stdout/stderr so output flows directly to terminal
-        let mut child = Command::new(&client_binary)
+        // Spawn the client with piped output so we can capture it
+        let child = Command::new(&client_binary)
             .args(&client_args)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn client binary")?;
 
         info!("Client started, waiting for completion...");
 
-        // Wait for client to complete (with timeout)
+        // Wait for client to complete (with timeout) and capture output
         let timeout = Duration::from_secs(total_duration + 60); // Add buffer
-        let result = tokio::time::timeout(timeout, child.wait()).await;
+        let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
 
         let elapsed = start_time.elapsed();
 
@@ -223,14 +231,31 @@ impl TestRunner {
             .as_secs_f64();
 
         let client_success = match result {
-            Ok(Ok(status)) => {
-                if status.success() {
+            Ok(Ok(output)) => {
+                // Save client output to log file
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let combined = format!(
+                    "=== Client stdout ===\n{}\n=== Client stderr ===\n{}",
+                    stdout, stderr
+                );
+
+                if let Err(e) = self.run_ctx.append_client_log(&combined) {
+                    warn!("Failed to save client log: {:?}", e);
+                }
+
+                // Also print stderr to coordinator output (contains tracing logs)
+                for line in stderr.lines() {
+                    info!("[client] {}", line);
+                }
+
+                if output.status.success() {
                     info!("Client completed successfully in {:?}", elapsed);
                     true
                 } else {
-                    error!("Client exited with status: {}", status);
+                    error!("Client exited with status: {}", output.status);
                     // Log hint for common exit codes
-                    if let Some(code) = status.code() {
+                    if let Some(code) = output.status.code() {
                         match code {
                             126 => error!(
                                 "Exit code 126: Permission denied or binary not executable. \
@@ -254,7 +279,6 @@ impl TestRunner {
             }
             Err(_) => {
                 error!("Client timed out after {:?}", timeout);
-                let _ = child.kill().await;
                 false
             }
         };

@@ -245,6 +245,30 @@ impl DockerManager {
         Ok(())
     }
 
+    /// Get logs from all containers
+    pub async fn get_logs(&self) -> Result<String> {
+        let output = Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                &self.compose_file,
+                "-p",
+                &self.project_name,
+                "logs",
+                "--no-color",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to get docker logs")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        Ok(format!("{}{}", stdout, stderr))
+    }
+
     /// Execute a command in the postgres container
     /// Uses -t (tuples-only) for machine-readable output without headers
     pub async fn exec_postgres(&self, command: &str) -> Result<String> {
