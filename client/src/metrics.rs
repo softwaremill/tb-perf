@@ -20,8 +20,8 @@ pub struct WorkloadMetrics {
     pub dropped: Counter<u64>,
     /// Histogram for transfer latency in microseconds
     pub latency_us: Histogram<u64>,
-    /// The meter provider (kept alive for shutdown)
-    _provider: Arc<SdkMeterProvider>,
+    /// The meter provider (kept alive for shutdown). None for test/noop metrics.
+    _provider: Option<Arc<SdkMeterProvider>>,
 }
 
 impl WorkloadMetrics {
@@ -83,7 +83,7 @@ impl WorkloadMetrics {
             failed,
             dropped,
             latency_us,
-            _provider: Arc::new(provider),
+            _provider: Some(Arc::new(provider)),
         })
     }
 
@@ -115,8 +115,30 @@ impl WorkloadMetrics {
 
     /// Shutdown the OpenTelemetry provider and flush remaining metrics
     pub fn shutdown(&self) {
-        if let Err(e) = self._provider.shutdown() {
+        if let Some(ref provider) = self._provider
+            && let Err(e) = provider.shutdown()
+        {
             tracing::warn!("Failed to shutdown OpenTelemetry provider: {:?}", e);
+        }
+    }
+
+    /// Create a no-op metrics instance for testing (no OTel export)
+    ///
+    /// Uses SDK provider without readers - metrics are collected but not exported.
+    /// This avoids network connections and background tasks.
+    #[cfg(test)]
+    pub fn new_noop() -> Self {
+        // Create SDK provider with no readers - no network, no background export
+        let provider = SdkMeterProvider::builder().build();
+        let meter = provider.meter("test");
+
+        Self {
+            completed: meter.u64_counter("test_completed").build(),
+            rejected: meter.u64_counter("test_rejected").build(),
+            failed: meter.u64_counter("test_failed").build(),
+            dropped: meter.u64_counter("test_dropped").build(),
+            latency_us: meter.u64_histogram("test_latency").build(),
+            _provider: None, // Don't keep provider - avoid shutdown delays
         }
     }
 }

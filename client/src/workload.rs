@@ -234,6 +234,25 @@ impl<E: TransferExecutor> WorkloadRunner<E> {
         }
     }
 
+    /// Create a workload runner with custom durations (for testing)
+    #[cfg(test)]
+    fn new_with_durations(
+        executor: E,
+        num_accounts: u64,
+        warmup_duration: Duration,
+        test_duration: Duration,
+        metrics: WorkloadMetrics,
+    ) -> Self {
+        Self {
+            executor,
+            account_selector: AccountSelector::new(num_accounts, 0.0),
+            transfer_generator: TransferGenerator::new(1, 100),
+            metrics,
+            warmup_duration,
+            test_duration,
+        }
+    }
+
     /// Run the workload in max_throughput mode
     ///
     /// Spawns multiple workers that execute transfers as fast as possible.
@@ -507,5 +526,243 @@ mod tests {
             let amount = generator.generate_amount(&mut rng);
             assert!(amount >= 1 && amount <= 1000);
         }
+    }
+
+    // ========== WorkloadRunner Tests ==========
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// Mock executor for testing WorkloadRunner without database operations
+    #[derive(Clone)]
+    struct MockExecutor {
+        /// Simulated transfer latency
+        latency: Duration,
+        /// Count of executed transfers (shared across clones)
+        call_count: Arc<AtomicUsize>,
+        /// Result to return from execute()
+        result: TransferResult,
+    }
+
+    impl MockExecutor {
+        fn new(latency_us: u64) -> Self {
+            Self {
+                latency: Duration::from_micros(latency_us),
+                call_count: Arc::new(AtomicUsize::new(0)),
+                result: TransferResult::Success,
+            }
+        }
+
+        fn with_result(mut self, result: TransferResult) -> Self {
+            self.result = result;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl TransferExecutor for MockExecutor {
+        async fn execute(&self, _source: u64, _dest: u64, _amount: u64) -> Result<TransferResult> {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            if self.latency.is_zero() {
+                // Yield to allow other tasks (like timers) to run
+                tokio::task::yield_now().await;
+            } else {
+                tokio::time::sleep(self.latency).await;
+            }
+            Ok(self.result)
+        }
+    }
+
+    /// Create a no-op WorkloadMetrics for testing (no OTel export)
+    fn test_metrics() -> WorkloadMetrics {
+        WorkloadMetrics::new_noop()
+    }
+
+    // Test duration constants (short for fast tests)
+    const TEST_DURATION: Duration = Duration::from_millis(100);
+    const NO_WARMUP: Duration = Duration::ZERO;
+
+    #[tokio::test]
+    async fn test_max_throughput_executes_transfers() {
+        let executor = MockExecutor::new(100); // 100µs latency
+        let call_count = executor.call_count.clone();
+
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            TEST_DURATION,
+            test_metrics(),
+        );
+
+        runner.run_max_throughput(2).await.unwrap();
+
+        // With 2 workers running for 100ms with 100µs latency,
+        // we expect many transfers
+        let count = call_count.load(Ordering::Relaxed);
+        assert!(count > 10, "Expected many transfers, got {}", count);
+    }
+
+    #[tokio::test]
+    async fn test_max_throughput_multiple_workers() {
+        // Test that more workers = more throughput
+        let executor1 = MockExecutor::new(500); // 500µs latency
+        let count1 = executor1.call_count.clone();
+
+        let runner1 = WorkloadRunner::new_with_durations(
+            executor1,
+            100,
+            NO_WARMUP,
+            TEST_DURATION,
+            test_metrics(),
+        );
+        runner1.run_max_throughput(1).await.unwrap();
+
+        let executor2 = MockExecutor::new(500);
+        let count2 = executor2.call_count.clone();
+
+        let runner2 = WorkloadRunner::new_with_durations(
+            executor2,
+            100,
+            NO_WARMUP,
+            TEST_DURATION,
+            test_metrics(),
+        );
+        runner2.run_max_throughput(4).await.unwrap();
+
+        // 4 workers should complete more transfers than 1 worker
+        let c1 = count1.load(Ordering::Relaxed);
+        let c2 = count2.load(Ordering::Relaxed);
+        assert!(
+            c2 > c1,
+            "4 workers ({}) should complete more than 1 worker ({})",
+            c2, c1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fixed_rate_respects_target_rate() {
+        let executor = MockExecutor::new(100); // 100µs latency (fast)
+        let call_count = executor.call_count.clone();
+
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            Duration::from_millis(200), // 200ms for more stable rate measurement
+            test_metrics(),
+        );
+
+        let target_rate = 500; // 500 req/s
+        runner.run_fixed_rate(target_rate, 1000).await.unwrap();
+
+        // With 500 req/s for 200ms, we expect ~100 transfers
+        let count = call_count.load(Ordering::Relaxed);
+        assert!(
+            count >= 50 && count <= 200,
+            "Expected ~100 transfers at 500 req/s for 200ms, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fixed_rate_drops_when_concurrency_exceeded() {
+        // Use a slow executor to cause backpressure
+        let executor = MockExecutor::new(20_000); // 20ms latency
+        let call_count = executor.call_count.clone();
+
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            TEST_DURATION,
+            test_metrics(),
+        );
+
+        // High rate (1000/s) but very low concurrency limit (2)
+        // With 20ms latency and max 2 concurrent, max ~100/s actual
+        runner.run_fixed_rate(1000, 2).await.unwrap();
+
+        let count = call_count.load(Ordering::Relaxed);
+        // Should be limited by concurrency, not by rate
+        assert!(
+            count < 50,
+            "Expected concurrency limit to restrict completions, got {}",
+            count
+        );
+    }
+
+    #[tokio::test]
+    async fn test_phase_controller_transitions() {
+        let phase_ctrl = PhaseController::new(
+            Duration::from_millis(30),  // 30ms warmup
+            Duration::from_millis(30),  // 30ms measurement
+        );
+
+        let phase_flag = phase_ctrl.phase_flag();
+        let stop_flag = phase_ctrl.stop_flag();
+
+        // Initially in warmup phase
+        assert!(!phase_flag.load(Ordering::Relaxed), "Should start in warmup");
+        assert!(!stop_flag.load(Ordering::Relaxed), "Should not be stopped");
+
+        // Run phases in background
+        let handle = tokio::spawn(async move { phase_ctrl.run_phases().await });
+
+        // Wait for warmup to complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            phase_flag.load(Ordering::Relaxed),
+            "Should be in measurement phase"
+        );
+        assert!(!stop_flag.load(Ordering::Relaxed), "Should not be stopped yet");
+
+        // Wait for measurement to complete
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(stop_flag.load(Ordering::Relaxed), "Should be stopped");
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_fixed_rate_zero_rate_fails() {
+        let executor = MockExecutor::new(100);
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            TEST_DURATION,
+            test_metrics(),
+        );
+
+        let result = runner.run_fixed_rate(0, 100).await;
+        assert!(result.is_err(), "Zero rate should fail");
+    }
+
+    #[tokio::test]
+    async fn test_executor_with_insufficient_balance() {
+        let executor = MockExecutor::new(0).with_result(TransferResult::InsufficientBalance);
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            Duration::from_millis(50),
+            test_metrics(),
+        );
+        // Should not panic with rejected transfers
+        runner.run_max_throughput(1).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_executor_with_failed_result() {
+        let executor = MockExecutor::new(0).with_result(TransferResult::Failed);
+        let runner = WorkloadRunner::new_with_durations(
+            executor,
+            100,
+            NO_WARMUP,
+            Duration::from_millis(50),
+            test_metrics(),
+        );
+        // Should not panic with failed transfers
+        runner.run_max_throughput(1).await.unwrap();
     }
 }
