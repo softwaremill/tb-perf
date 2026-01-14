@@ -119,7 +119,6 @@ pub enum PoolRecyclingMethod {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TigerBeetleConfig {
     pub cluster_addresses: Vec<String>,
-    pub measure_batch_sizes: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -411,7 +410,6 @@ mod tests {
         config.postgresql = None;
         config.tigerbeetle = Some(TigerBeetleConfig {
             cluster_addresses: vec!["3000".to_string()],
-            measure_batch_sizes: true,
         });
         assert!(config.validate().is_ok());
     }
@@ -423,7 +421,6 @@ mod tests {
         config.postgresql = None;
         config.tigerbeetle = Some(TigerBeetleConfig {
             cluster_addresses: vec![],
-            measure_batch_sizes: true,
         });
         assert!(config.validate().is_err());
     }

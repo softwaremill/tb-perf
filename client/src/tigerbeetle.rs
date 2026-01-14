@@ -28,9 +28,6 @@ impl TransferExecutor for TigerBeetleExecutor {
 }
 
 /// Create a TigerBeetle workload runner
-///
-/// Note: `measure_batch_sizes` parameter is accepted for API compatibility
-/// but not currently used. TigerBeetle batching is handled internally.
 pub async fn create_workload(
     cluster_addresses: &[String],
     num_accounts: u64,
@@ -39,7 +36,6 @@ pub async fn create_workload(
     max_transfer_amount: u64,
     warmup_duration_secs: u64,
     test_duration_secs: u64,
-    _measure_batch_sizes: bool,
     metrics: WorkloadMetrics,
 ) -> Result<WorkloadRunner<TigerBeetleExecutor>> {
     // TigerBeetle cluster ID 0 for local development

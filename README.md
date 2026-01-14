@@ -150,7 +150,6 @@ auto_vacuum = false
 
 [tigerbeetle]
 cluster_addresses = ["3000"]        # Host:port for each replica
-measure_batch_sizes = true
 
 [deployment]
 type = "local"      # or "cloud"

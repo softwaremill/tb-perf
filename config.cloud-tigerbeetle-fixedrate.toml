@@ -17,7 +17,6 @@ type = "tigerbeetle"
 
 [tigerbeetle]
 cluster_addresses = ["tb-node-1:3000", "tb-node-2:3000", "tb-node-3:3000"]
-measure_batch_sizes = true
 
 [deployment]
 type = "cloud"

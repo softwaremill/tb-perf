@@ -132,7 +132,8 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
 async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
     info!("Running TigerBeetle workload");
 
-    let tb_config = config
+    // Validate TigerBeetle config exists (addresses come from args)
+    let _ = config
         .tigerbeetle
         .as_ref()
         .context("TigerBeetle config missing (should have been validated)")?;
@@ -144,7 +145,6 @@ async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
         .map(|s| s.to_string())
         .collect();
     info!("  Cluster addresses: {:?}", addresses);
-    info!("  Measure batch sizes: {}", tb_config.measure_batch_sizes);
 
     let test_mode = config.workload.test_mode()?;
     let test_mode_str = test_mode.as_str();
@@ -163,7 +163,6 @@ async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
         config.workload.max_transfer_amount,
         config.workload.warmup_duration_secs,
         config.workload.test_duration_secs,
-        tb_config.measure_batch_sizes,
         metrics,
     )
     .await

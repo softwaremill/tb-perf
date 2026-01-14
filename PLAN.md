@@ -121,7 +121,6 @@ For `test_mode = "fixed_rate"`:
 
 **`[tigerbeetle]` section** (used by clients when database.type = "tigerbeetle"):
 - `cluster_addresses` - TigerBeetle cluster connection addresses
-- `measure_batch_sizes` - Record actual batch sizes (default: true)
 
 **`[deployment]` section** (used by coordinator):
 - `type` - "local" or "cloud"

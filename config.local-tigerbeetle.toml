@@ -16,7 +16,6 @@ type = "tigerbeetle"
 
 [tigerbeetle]
 cluster_addresses = ["3000"]
-measure_batch_sizes = true
 
 [deployment]
 type = "local"
