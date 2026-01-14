@@ -10,8 +10,6 @@ mod tigerbeetle;
 mod workload;
 
 use metrics::WorkloadMetrics;
-use postgres::PostgresWorkload;
-use tigerbeetle::TigerBeetleWorkload;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -96,8 +94,8 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
         .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
-    // Create workload executor
-    let workload = PostgresWorkload::new(
+    // Create workload runner
+    let workload = postgres::create_workload(
         pg_config,
         &args.pg_host,
         args.pg_port,
@@ -156,8 +154,8 @@ async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
         .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
-    // Create workload executor
-    let workload = TigerBeetleWorkload::new(
+    // Create workload runner
+    let workload = tigerbeetle::create_workload(
         &addresses,
         config.workload.num_accounts,
         config.workload.zipfian_exponent,

@@ -188,10 +188,10 @@ impl Config {
                         "PostgreSQL database type requires [postgresql] configuration section"
                     );
                 }
-                if let Some(ref pg) = self.postgresql {
-                    if pg.connection_pool_size == 0 {
-                        anyhow::bail!("connection_pool_size must be >= 1");
-                    }
+                if let Some(ref pg) = self.postgresql
+                    && pg.connection_pool_size == 0
+                {
+                    anyhow::bail!("connection_pool_size must be >= 1");
                 }
             }
             DatabaseType::TigerBeetle => {
@@ -200,10 +200,10 @@ impl Config {
                         "TigerBeetle database type requires [tigerbeetle] configuration section"
                     );
                 }
-                if let Some(ref tb) = self.tigerbeetle {
-                    if tb.cluster_addresses.is_empty() {
-                        anyhow::bail!("cluster_addresses must not be empty");
-                    }
+                if let Some(ref tb) = self.tigerbeetle
+                    && tb.cluster_addresses.is_empty()
+                {
+                    anyhow::bail!("cluster_addresses must not be empty");
                 }
             }
         }

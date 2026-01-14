@@ -247,8 +247,7 @@ impl DockerManager {
 
     /// Save logs from all containers directly to a file
     pub async fn save_logs_to_file(&self, path: &std::path::Path) -> Result<()> {
-        let log_file =
-            std::fs::File::create(path).context("Failed to create docker log file")?;
+        let log_file = std::fs::File::create(path).context("Failed to create docker log file")?;
         let log_file_err = log_file.try_clone().context("Failed to clone log file")?;
 
         let status = Command::new("docker")

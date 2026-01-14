@@ -160,10 +160,7 @@ impl PrometheusClient {
     /// phase data is counted (not warmup or quiet period).
     ///
     /// - `measurement_start`: Unix timestamp when measurement phase began
-    pub async fn collect_metrics(
-        &self,
-        measurement_start: f64,
-    ) -> Result<CollectedMetrics> {
+    pub async fn collect_metrics(&self, measurement_start: f64) -> Result<CollectedMetrics> {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         let mut metrics = CollectedMetrics::default();

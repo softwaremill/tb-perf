@@ -1,11 +1,14 @@
 use crate::metrics::{TestPhase, WorkloadMetrics};
 use anyhow::Result;
+use async_trait::async_trait;
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use rand_distr::{Distribution, Zipf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tracing::info;
+use tracing::{debug, info, warn};
 
 /// Generates account pairs for transfers using Zipfian distribution
 #[derive(Clone)]
@@ -76,13 +79,6 @@ pub enum TransferResult {
     AccountNotFound,
     /// Transfer failed due to database error (after retries)
     Failed,
-}
-
-/// SQL return value constants (must match init-postgresql.sql)
-pub mod sql_results {
-    pub const SUCCESS: &str = "success";
-    pub const INSUFFICIENT_BALANCE: &str = "insufficient_balance";
-    pub const ACCOUNT_NOT_FOUND: &str = "account_not_found";
 }
 
 /// Controls test phase transitions (warmup -> measurement -> stop)
@@ -191,6 +187,269 @@ pub fn record_transfer_result(
             metrics.record_failed(phase.as_str());
         }
     }
+}
+
+/// Trait for database-specific transfer execution
+///
+/// Implementations handle the details of executing a transfer against
+/// a specific database backend (PostgreSQL, TigerBeetle, etc.)
+#[async_trait]
+pub trait TransferExecutor: Clone + Send + Sync + 'static {
+    /// Execute a transfer from source to destination account
+    async fn execute(&self, source: u64, dest: u64, amount: u64) -> Result<TransferResult>;
+}
+
+/// Generic workload runner that executes transfers using a database-specific executor
+///
+/// This struct encapsulates the common workload execution logic (max_throughput and
+/// fixed_rate modes), parameterized by a TransferExecutor implementation.
+pub struct WorkloadRunner<E: TransferExecutor> {
+    executor: E,
+    account_selector: AccountSelector,
+    transfer_generator: TransferGenerator,
+    metrics: WorkloadMetrics,
+    warmup_duration: Duration,
+    test_duration: Duration,
+}
+
+impl<E: TransferExecutor> WorkloadRunner<E> {
+    /// Create a new workload runner
+    pub fn new(
+        executor: E,
+        num_accounts: u64,
+        zipfian_exponent: f64,
+        min_transfer_amount: u64,
+        max_transfer_amount: u64,
+        warmup_duration_secs: u64,
+        test_duration_secs: u64,
+        metrics: WorkloadMetrics,
+    ) -> Self {
+        Self {
+            executor,
+            account_selector: AccountSelector::new(num_accounts, zipfian_exponent),
+            transfer_generator: TransferGenerator::new(min_transfer_amount, max_transfer_amount),
+            metrics,
+            warmup_duration: Duration::from_secs(warmup_duration_secs),
+            test_duration: Duration::from_secs(test_duration_secs),
+        }
+    }
+
+    /// Run the workload in max_throughput mode
+    ///
+    /// Spawns multiple workers that execute transfers as fast as possible.
+    pub async fn run_max_throughput(&self, concurrency: usize) -> Result<()> {
+        info!(
+            "Starting max_throughput workload with {} workers",
+            concurrency
+        );
+
+        let phase_ctrl = PhaseController::new(self.warmup_duration, self.test_duration);
+
+        // Spawn workers
+        let mut handles = Vec::new();
+        for worker_id in 0..concurrency {
+            let executor = self.executor.clone();
+            let account_selector = self.account_selector.clone();
+            let transfer_generator = self.transfer_generator.clone();
+            let metrics = self.metrics.clone();
+            let stop = phase_ctrl.stop_flag();
+            let phase = phase_ctrl.phase_flag();
+            let count = phase_ctrl.completed_count();
+
+            handles.push(tokio::spawn(async move {
+                max_throughput_worker(
+                    worker_id,
+                    executor,
+                    account_selector,
+                    transfer_generator,
+                    metrics,
+                    stop,
+                    phase,
+                    count,
+                )
+                .await
+            }));
+        }
+
+        // Run phase timing
+        let (start, warmup_count) = phase_ctrl.run_phases().await;
+        info!("Stopping workers...");
+
+        // Wait for all workers
+        for handle in handles {
+            if let Err(e) = handle.await {
+                tracing::error!("Worker error: {:?}", e);
+            }
+        }
+
+        phase_ctrl.log_stats(start, warmup_count);
+        Ok(())
+    }
+
+    /// Run the workload in fixed_rate mode
+    ///
+    /// Submits transfers at a fixed rate, dropping requests if max concurrency is exceeded.
+    /// Uses coordinated omission correction by measuring latency from scheduled time.
+    pub async fn run_fixed_rate(&self, target_rate: u64, max_concurrency: usize) -> Result<()> {
+        // Guard against division by zero
+        if target_rate == 0 {
+            anyhow::bail!("target_rate must be greater than 0");
+        }
+
+        info!(
+            "Starting fixed_rate workload at {} req/s (max concurrency: {})",
+            target_rate, max_concurrency
+        );
+
+        let phase_ctrl = PhaseController::new(self.warmup_duration, self.test_duration);
+        let in_flight = Arc::new(AtomicU64::new(0));
+
+        let interval_ns = 1_000_000_000 / target_rate;
+        let expected_interval = Duration::from_nanos(interval_ns);
+
+        // Spawn request submitter
+        let executor = self.executor.clone();
+        let metrics = self.metrics.clone();
+        let stop = phase_ctrl.stop_flag();
+        let phase = phase_ctrl.phase_flag();
+        let count = phase_ctrl.completed_count();
+        let in_flight_clone = in_flight.clone();
+        let account_selector = self.account_selector.clone();
+        let transfer_generator = self.transfer_generator.clone();
+
+        let submitter = tokio::spawn(async move {
+            let mut rng = SmallRng::from_rng(&mut rand::rng());
+            let mut next_submit = Instant::now();
+
+            while !stop.load(Ordering::Relaxed) {
+                // Rate limit - sleep until scheduled time
+                let now = Instant::now();
+                if now < next_submit {
+                    tokio::time::sleep(next_submit - now).await;
+                }
+
+                // Record scheduled time for coordinated omission correction
+                let scheduled_time = next_submit;
+
+                // Advance schedule by fixed interval
+                next_submit += expected_interval;
+
+                // Check current phase for dropped request tracking
+                let current_phase = get_current_phase(&phase);
+
+                // Check concurrency limit
+                if in_flight_clone.load(Ordering::Relaxed) >= max_concurrency as u64 {
+                    warn!("Max concurrency reached, dropping request");
+                    metrics.record_dropped(current_phase.as_str());
+                    continue;
+                }
+
+                // Submit request
+                let (source, dest) = account_selector.select_transfer_accounts(&mut rng);
+                let amount = transfer_generator.generate_amount(&mut rng);
+
+                in_flight_clone.fetch_add(1, Ordering::Relaxed);
+
+                tokio::spawn(fixed_rate_transfer_task(
+                    executor.clone(),
+                    source,
+                    dest,
+                    amount,
+                    scheduled_time,
+                    phase.clone(),
+                    metrics.clone(),
+                    count.clone(),
+                    in_flight_clone.clone(),
+                ));
+            }
+        });
+
+        // Run phase timing
+        let (start, warmup_count) = phase_ctrl.run_phases().await;
+        info!("Stopping...");
+
+        let _ = submitter.await;
+
+        // Wait for in-flight requests
+        while in_flight.load(Ordering::Relaxed) > 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        phase_ctrl.log_stats(start, warmup_count);
+        Ok(())
+    }
+}
+
+/// Execute a single transfer and record metrics for fixed_rate mode
+///
+/// This is spawned as a separate task for each transfer in fixed_rate mode.
+/// Latency is measured from `scheduled_time` to account for coordinated omission.
+async fn fixed_rate_transfer_task<E: TransferExecutor>(
+    executor: E,
+    source: u64,
+    dest: u64,
+    amount: u64,
+    scheduled_time: Instant,
+    phase_flag: Arc<AtomicBool>,
+    metrics: WorkloadMetrics,
+    completed_count: Arc<AtomicU64>,
+    in_flight: Arc<AtomicU64>,
+) {
+    let result = executor.execute(source, dest, amount).await;
+
+    // Measure from scheduled time for coordinated omission correction
+    let latency = scheduled_time.elapsed();
+    let latency_us = latency.as_micros() as u64;
+
+    // Capture phase at recording time, not submission time
+    let current_phase = get_current_phase(&phase_flag);
+
+    record_transfer_result(
+        &result,
+        latency_us,
+        &current_phase,
+        &metrics,
+        &completed_count,
+    );
+
+    in_flight.fetch_sub(1, Ordering::Relaxed);
+}
+
+/// Worker task for max_throughput mode - runs transfers as fast as possible
+async fn max_throughput_worker<E: TransferExecutor>(
+    worker_id: usize,
+    executor: E,
+    account_selector: AccountSelector,
+    transfer_generator: TransferGenerator,
+    metrics: WorkloadMetrics,
+    stop: Arc<AtomicBool>,
+    phase: Arc<AtomicBool>,
+    completed_count: Arc<AtomicU64>,
+) {
+    let mut rng = SmallRng::from_rng(&mut rand::rng());
+    debug!("Worker {} started", worker_id);
+
+    while !stop.load(Ordering::Relaxed) {
+        let (source, dest) = account_selector.select_transfer_accounts(&mut rng);
+        let amount = transfer_generator.generate_amount(&mut rng);
+
+        let start = Instant::now();
+        let result = executor.execute(source, dest, amount).await;
+        let latency = start.elapsed();
+        let latency_us = latency.as_micros() as u64;
+
+        // Capture phase at recording time for accurate attribution
+        let current_phase = get_current_phase(&phase);
+        record_transfer_result(
+            &result,
+            latency_us,
+            &current_phase,
+            &metrics,
+            &completed_count,
+        );
+    }
+
+    debug!("Worker {} stopped", worker_id);
 }
 
 #[cfg(test)]

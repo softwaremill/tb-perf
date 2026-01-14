@@ -273,11 +273,7 @@ impl<'a> TestRunner<'a> {
         let measurement_start = spawn_unix_time + warmup_duration as f64;
 
         // Query metrics from Prometheus for the measurement window
-        let metrics = match self
-            .prometheus
-            .collect_metrics(measurement_start)
-            .await
-        {
+        let metrics = match self.prometheus.collect_metrics(measurement_start).await {
             Ok(m) => {
                 info!(
                     "Collected metrics: completed={}, rejected={}, failed={}",
