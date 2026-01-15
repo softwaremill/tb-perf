@@ -46,13 +46,13 @@ pub async fn init_accounts(
     let client =
         tb::Client::new(cluster_id, &addresses).context("Failed to create TigerBeetle client")?;
 
-    // Create accounts in batches
+    // Create accounts in batches (1-based IDs, since TigerBeetle reserves ID 0)
     let created = process_batched(num_accounts, |batch_start, batch_end| {
         let client = &client;
         async move {
             let accounts: Vec<tb::Account> = (batch_start..batch_end)
                 .map(|id| {
-                    tb::Account::new(id as u128, 1, 1)
+                    tb::Account::new((id + 1) as u128, 1, 1)
                         .with_flags(tb::account::Flags::DEBITS_MUST_NOT_EXCEED_CREDITS)
                 })
                 .collect();
@@ -116,7 +116,7 @@ pub async fn init_accounts(
                 .map(|id| {
                     tb::Transfer::new(tb::id())
                         .with_debit_account_id(bank_id)
-                        .with_credit_account_id(id as u128)
+                        .with_credit_account_id((id + 1) as u128)
                         .with_amount(initial_balance as u128)
                         .with_ledger(1)
                         .with_code(1)
@@ -163,7 +163,7 @@ pub async fn verify_total_balance(
     let total_balance = process_batched(num_accounts, |batch_start, batch_end| {
         let client = &client;
         async move {
-            let ids: Vec<u128> = (batch_start..batch_end).map(|id| id as u128).collect();
+            let ids: Vec<u128> = (batch_start..batch_end).map(|id| (id + 1) as u128).collect();
 
             let accounts = client
                 .lookup_accounts(ids)
