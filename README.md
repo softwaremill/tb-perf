@@ -29,20 +29,29 @@ tb-perf/
 ## Running Tests
 
 ```bash
+# Build first (rebuilds only if source changed)
+cargo build --release
+
 # PostgreSQL sanity check (~30 seconds)
-cargo run --release --bin coordinator -- -c config.sanity-postgresql.toml
+./target/release/coordinator -c config.sanity-postgresql.toml
+
+# PostgreSQL batched sanity check (~30 seconds)
+./target/release/coordinator -c config.sanity-postgresql-batched.toml
 
 # TigerBeetle sanity check (~30 seconds)
-cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml
+./target/release/coordinator -c config.sanity-tigerbeetle.toml
 
 # PostgreSQL full test (~25 minutes)
-cargo run --release --bin coordinator -- -c config.local-postgresql.toml
+./target/release/coordinator -c config.local-postgresql.toml
+
+# PostgreSQL batched full test (~25 minutes)
+./target/release/coordinator -c config.local-postgresql-batched.toml
 
 # TigerBeetle full test (~25 minutes)
-cargo run --release --bin coordinator -- -c config.local-tigerbeetle.toml
+./target/release/coordinator -c config.local-tigerbeetle.toml
 ```
 
-The coordinator automatically builds, manages Docker, and exports results to `./results/`.
+The coordinator manages Docker and exports results to `./results/`.
 
 **Options:**
 - `--keep-running` - Keep Grafana/Prometheus running after test
@@ -63,14 +72,14 @@ TigerBeetle in Docker requires `io_uring` which isn't available on macOS. Run Ti
 
 ```bash
 # Install TigerBeetle (one-time)
--curl -Lo tigerbeetle.zip https://mac.tigerbeetle.com && unzip tigerbeetle.zip && rm tigerbeetle.zip
+curl -Lo tigerbeetle.zip https://mac.tigerbeetle.com && unzip tigerbeetle.zip && rm tigerbeetle.zip
 
 # Start TigerBeetle locally + monitoring stack in Docker
 ./scripts/tigerbeetle-local.sh start
 docker compose -f docker/docker-compose.tigerbeetle.yml -p tbperf up -d otel-collector prometheus grafana
 
 # Run test with --no-docker
-cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml --no-docker
+./target/release/coordinator -c config.sanity-tigerbeetle.toml --no-docker
 
 # Cleanup
 ./scripts/tigerbeetle-local.sh wipe
@@ -86,8 +95,10 @@ The system uses a single TOML configuration file read by both coordinator and cl
 | File | Database | Mode | Duration | Runs | Purpose |
 |------|----------|------|----------|------|---------|
 | `config.sanity-postgresql.toml` | PostgreSQL | max_throughput | 10s + 5s warmup | 1 | Quick verification |
+| `config.sanity-postgresql-batched.toml` | PostgreSQL (batched) | max_throughput | 10s + 5s warmup | 1 | Quick verification |
 | `config.sanity-tigerbeetle.toml` | TigerBeetle | max_throughput | 10s + 5s warmup | 1 | Quick verification |
 | `config.local-postgresql.toml` | PostgreSQL | max_throughput | 5min + 2min warmup | 3 | Proper local test |
+| `config.local-postgresql-batched.toml` | PostgreSQL (batched) | max_throughput | 5min + 2min warmup | 3 | Proper local test |
 | `config.local-tigerbeetle.toml` | TigerBeetle | max_throughput | 5min + 2min warmup | 3 | Proper local test |
 | `config.cloud-tigerbeetle-fixedrate.toml` | TigerBeetle | fixed_rate | 5min + 2min warmup | 3 | Cloud example |
 
