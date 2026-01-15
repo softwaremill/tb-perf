@@ -135,6 +135,7 @@ pub struct AtomicPostgresExecutor {
 #[async_trait]
 impl TransferExecutor for AtomicPostgresExecutor {
     async fn execute(&self, source: u64, dest: u64, amount: u64) -> Result<TransferResult> {
+        // No retry needed - transfer_atomic uses ID ordering to prevent deadlocks
         execute_atomic_transfer(&self.pool, &self.isolation_level, source, dest, amount).await
     }
 }
@@ -196,7 +197,15 @@ pub async fn create_atomic_workload(
     ))
 }
 
-/// Execute an atomic transfer (no explicit locks)
+/// Custom SQLSTATE codes used by transfer_atomic function
+mod atomic_sqlstate {
+    /// Insufficient balance (TB001)
+    pub const INSUFFICIENT_BALANCE: &str = "TB001";
+    /// Account not found (TB002)
+    pub const ACCOUNT_NOT_FOUND: &str = "TB002";
+}
+
+/// Execute an atomic transfer (no explicit locks, deadlock-free via ID ordering)
 async fn execute_atomic_transfer(
     pool: &Pool,
     isolation_level: &IsolationLevel,
@@ -219,25 +228,40 @@ async fn execute_atomic_transfer(
         isolation_level_str, source, dest, amount
     );
 
-    let messages = client.simple_query(&sql).await?;
+    let result = client.simple_query(&sql).await;
 
-    // Find the row with the transfer result
-    for msg in messages {
-        if let SimpleQueryMessage::Row(row) = msg {
-            let status = row.get(0).context("Missing transfer result")?;
-            return match status {
-                sql_results::SUCCESS => Ok(TransferResult::Success),
-                sql_results::INSUFFICIENT_BALANCE => Ok(TransferResult::InsufficientBalance),
-                sql_results::ACCOUNT_NOT_FOUND => Ok(TransferResult::AccountNotFound),
-                _ => {
-                    warn!("Unexpected transfer result: {}", status);
-                    Ok(TransferResult::Failed)
+    match result {
+        Ok(messages) => {
+            // Find the row with the transfer result
+            for msg in messages {
+                if let SimpleQueryMessage::Row(row) = msg {
+                    let status = row.get(0).context("Missing transfer result")?;
+                    return match status {
+                        sql_results::SUCCESS => Ok(TransferResult::Success),
+                        _ => {
+                            warn!("Unexpected transfer result: {}", status);
+                            Ok(TransferResult::Failed)
+                        }
+                    };
                 }
-            };
+            }
+            anyhow::bail!("No result from transfer_atomic function")
+        }
+        Err(e) => {
+            // Check for custom SQLSTATE codes from transfer_atomic exceptions
+            if let Some(db_err) = e.as_db_error() {
+                let code = db_err.code().code();
+                if code == atomic_sqlstate::INSUFFICIENT_BALANCE {
+                    return Ok(TransferResult::InsufficientBalance);
+                }
+                if code == atomic_sqlstate::ACCOUNT_NOT_FOUND {
+                    return Ok(TransferResult::AccountNotFound);
+                }
+            }
+            // Propagate other errors
+            Err(e.into())
         }
     }
-
-    anyhow::bail!("No result from transfer_atomic function")
 }
 
 /// Check if an error is a serialization failure using SQLSTATE code

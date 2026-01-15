@@ -92,8 +92,12 @@ $$ LANGUAGE plpgsql;
 
 -- Atomic transfer function (no explicit locks)
 -- Uses atomic UPDATE with balance check in WHERE clause
+-- Updates accounts in ID order to prevent deadlocks
 -- Safe at READ COMMITTED due to row-level locking during UPDATE
--- Returns: 'success', 'insufficient_balance', or 'account_not_found'
+--
+-- Returns 'success' on success.
+-- Raises exception with SQLSTATE 'TB001' for insufficient_balance
+-- Raises exception with SQLSTATE 'TB002' for account_not_found
 CREATE OR REPLACE FUNCTION transfer_atomic(
     p_source_id BIGINT,
     p_dest_id BIGINT,
@@ -102,33 +106,45 @@ CREATE OR REPLACE FUNCTION transfer_atomic(
 DECLARE
     v_updated INT;
 BEGIN
-    -- Atomic debit: only succeeds if sufficient balance
-    -- The UPDATE acquires a row lock, reads current balance, checks condition, writes
-    UPDATE accounts SET balance = balance - p_amount
-    WHERE id = p_source_id AND balance >= p_amount;
-
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
-
-    IF v_updated = 0 THEN
-        -- Either account doesn't exist or insufficient balance
-        -- Check which one
-        PERFORM 1 FROM accounts WHERE id = p_source_id;
-        IF NOT FOUND THEN
-            RETURN 'account_not_found';
-        ELSE
-            RETURN 'insufficient_balance';
+    IF p_source_id < p_dest_id THEN
+        -- Source has lower ID: debit first, then credit
+        UPDATE accounts SET balance = balance - p_amount
+        WHERE id = p_source_id AND balance >= p_amount;
+        GET DIAGNOSTICS v_updated = ROW_COUNT;
+        IF v_updated = 0 THEN
+            PERFORM 1 FROM accounts WHERE id = p_source_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+            ELSE
+                RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'TB001';
+            END IF;
         END IF;
-    END IF;
 
-    -- Atomic credit: balance = balance + amount is safe for concurrent updates
-    UPDATE accounts SET balance = balance + p_amount WHERE id = p_dest_id;
+        UPDATE accounts SET balance = balance + p_amount WHERE id = p_dest_id;
+        GET DIAGNOSTICS v_updated = ROW_COUNT;
+        IF v_updated = 0 THEN
+            RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+        END IF;
+    ELSE
+        -- Dest has lower ID: credit first, then debit
+        -- If debit fails, exception rolls back the credit
+        UPDATE accounts SET balance = balance + p_amount WHERE id = p_dest_id;
+        GET DIAGNOSTICS v_updated = ROW_COUNT;
+        IF v_updated = 0 THEN
+            RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+        END IF;
 
-    GET DIAGNOSTICS v_updated = ROW_COUNT;
-
-    IF v_updated = 0 THEN
-        -- Destination doesn't exist - rollback the debit
-        -- This will be handled by transaction rollback
-        RAISE EXCEPTION 'account_not_found';
+        UPDATE accounts SET balance = balance - p_amount
+        WHERE id = p_source_id AND balance >= p_amount;
+        GET DIAGNOSTICS v_updated = ROW_COUNT;
+        IF v_updated = 0 THEN
+            PERFORM 1 FROM accounts WHERE id = p_source_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+            ELSE
+                RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'TB001';
+            END IF;
+        END IF;
     END IF;
 
     -- Record the transfer
