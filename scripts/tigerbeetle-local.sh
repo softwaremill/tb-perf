@@ -3,6 +3,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+TIGERBEETLE_BIN="$PROJECT_DIR/tigerbeetle"
+
 DATA_DIR="${TIGERBEETLE_DATA_DIR:-/tmp/tb-perf}"
 DATA_FILE="$DATA_DIR/0_0.tigerbeetle"
 PID_FILE="$DATA_DIR/tigerbeetle.pid"
@@ -25,9 +29,9 @@ usage() {
 }
 
 check_tigerbeetle() {
-    if ! command -v tigerbeetle &> /dev/null; then
-        echo "Error: tigerbeetle not found in PATH"
-        echo "Install it with: curl -sL https://tigerbeetle.com/install.sh | bash"
+    if [ ! -x "$TIGERBEETLE_BIN" ]; then
+        echo "Error: tigerbeetle binary not found at $TIGERBEETLE_BIN"
+        echo "Download it from: https://tigerbeetle.com/install.sh"
         exit 1
     fi
 }
@@ -45,11 +49,11 @@ start_tigerbeetle() {
     # Format data file if it doesn't exist
     if [ ! -f "$DATA_FILE" ]; then
         echo "Formatting TigerBeetle data file..."
-        tigerbeetle format --cluster=0 --replica=0 --replica-count=1 "$DATA_FILE"
+        "$TIGERBEETLE_BIN" format --cluster=0 --replica=0 --replica-count=1 "$DATA_FILE"
     fi
 
     echo "Starting TigerBeetle on port $ADDRESS..."
-    tigerbeetle start --addresses="$ADDRESS" "$DATA_FILE" > "$LOG_FILE" 2>&1 &
+    "$TIGERBEETLE_BIN" start --addresses="$ADDRESS" "$DATA_FILE" > "$LOG_FILE" 2>&1 &
     echo $! > "$PID_FILE"
 
     # Wait a moment and verify it started
