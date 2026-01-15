@@ -27,3 +27,6 @@ terraform/.terraform.lock.hcl
 
 # Local configuration overrides
 config.local.toml
+
+# TB binary
+tigerbeetle

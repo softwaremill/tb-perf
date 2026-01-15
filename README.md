@@ -59,9 +59,12 @@ The coordinator automatically builds, manages Docker, and exports results to `./
 
 ### macOS: TigerBeetle Tests
 
-TigerBeetle in Docker requires `io_uring` which isn't available on macOS. Run TigerBeetle natively instead. Download the binary from [tigerbeetle.com](https://tigerbeetle.com) and place it in the project root.
+TigerBeetle in Docker requires `io_uring` which isn't available on macOS. Run TigerBeetle natively instead. 
 
 ```bash
+# Install TigerBeetle (one-time)
+-curl -Lo tigerbeetle.zip https://mac.tigerbeetle.com && unzip tigerbeetle.zip && rm tigerbeetle.zip
+
 # Start TigerBeetle locally + monitoring stack in Docker
 ./scripts/tigerbeetle-local.sh start
 docker compose -f docker/docker-compose.tigerbeetle.yml -p tbperf up -d otel-collector prometheus grafana
