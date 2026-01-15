@@ -279,6 +279,34 @@ Phase 4 (Testing Scenarios) - **TODO**
 - Endurance testing
 - Automated result analysis
 
+## Testing
+
+### Unit Tests
+
+Run Rust unit tests:
+```bash
+cargo test
+```
+
+### PostgreSQL Function Tests
+
+Test the `batch_transfers` SQL function:
+```bash
+# Start PostgreSQL
+docker compose -f docker/docker-compose.postgresql.yml -p tbperf up -d
+
+# Wait for it to be ready, then run the test
+docker exec -i tb-perf-postgres psql -U postgres -d tbperf < scripts/test-batch-transfers.sql
+```
+
+This verifies:
+- Successful transfers return code 0
+- Insufficient balance returns code 1
+- Account not found returns code 2
+- Failed transfers (constraint violations) return code 3
+- Mixed batches handle each transfer independently
+- Total balance remains unchanged (double-entry invariant)
+
 ## Troubleshooting
 
 ### "Client binary not found"
