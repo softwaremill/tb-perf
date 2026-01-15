@@ -1,5 +1,5 @@
-# Sanity-check configuration for PostgreSQL batched mode
-# Quick 30-second test to verify batched mode works correctly
+# Sanity-check configuration for PostgreSQL atomic mode
+# Quick 30-second test to verify atomic executor works correctly
 
 [workload]
 test_mode = "max_throughput"
@@ -17,9 +17,9 @@ type = "postgresql"
 
 [postgresql]
 isolation_level = "read_committed"
-connection_pool_size = 1  # Ignored in batched mode (single connection used)
-connection_pool_min_idle = 1
-executor_mode = "batched"  # Options: standard, atomic, batched
+connection_pool_size = 8
+connection_pool_min_idle = 4
+executor_mode = "atomic"  # Uses atomic UPDATE, no explicit locks
 
 [deployment]
 type = "local"

@@ -97,9 +97,22 @@ pub struct PostgresqlConfig {
     pub isolation_level: IsolationLevel,
     pub connection_pool_size: usize,
     pub connection_pool_min_idle: Option<usize>,
-    /// Enable batched mode (single connection, batch transfers like TigerBeetle)
+    /// Executor mode: standard (FOR UPDATE), atomic (no explicit locks), or batched
     #[serde(default)]
-    pub batched_mode: bool,
+    pub executor_mode: PostgresExecutorMode,
+}
+
+/// PostgreSQL executor mode
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostgresExecutorMode {
+    /// Standard mode: uses SELECT FOR UPDATE for pessimistic locking
+    #[default]
+    Standard,
+    /// Atomic mode: uses atomic UPDATE with balance check in WHERE clause (no explicit locks)
+    Atomic,
+    /// Batched mode: single connection, batches multiple transfers per SQL call
+    Batched,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -295,7 +308,7 @@ mod tests {
                 isolation_level: IsolationLevel::ReadCommitted,
                 connection_pool_size: 20,
                 connection_pool_min_idle: Some(20),
-                batched_mode: false,
+                executor_mode: PostgresExecutorMode::Standard,
             }),
             tigerbeetle: None,
             deployment: DeploymentConfig {

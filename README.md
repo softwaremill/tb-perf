@@ -32,20 +32,18 @@ tb-perf/
 # Build first (rebuilds only if source changed)
 cargo build --release
 
-# PostgreSQL sanity check (~30 seconds)
-./target/release/coordinator -c config.sanity-postgresql.toml
-
-# PostgreSQL batched sanity check (~30 seconds)
-./target/release/coordinator -c config.sanity-postgresql-batched.toml
+# PostgreSQL sanity checks (~30 seconds each)
+./target/release/coordinator -c config.sanity-postgresql.toml           # Standard (FOR UPDATE)
+./target/release/coordinator -c config.sanity-postgresql-atomic.toml    # Atomic UPDATE
+./target/release/coordinator -c config.sanity-postgresql-batched.toml   # Batched
 
 # TigerBeetle sanity check (~30 seconds)
 ./target/release/coordinator -c config.sanity-tigerbeetle.toml
 
-# PostgreSQL full test (~25 minutes)
-./target/release/coordinator -c config.local-postgresql.toml
-
-# PostgreSQL batched full test (~25 minutes)
-./target/release/coordinator -c config.local-postgresql-batched.toml
+# PostgreSQL full tests (~25 minutes each)
+./target/release/coordinator -c config.local-postgresql.toml            # Standard (FOR UPDATE)
+./target/release/coordinator -c config.local-postgresql-atomic.toml     # Atomic UPDATE
+./target/release/coordinator -c config.local-postgresql-batched.toml    # Batched
 
 # TigerBeetle full test (~25 minutes)
 ./target/release/coordinator -c config.local-tigerbeetle.toml
@@ -94,10 +92,12 @@ The system uses a single TOML configuration file read by both coordinator and cl
 
 | File | Database | Mode | Duration | Runs | Purpose |
 |------|----------|------|----------|------|---------|
-| `config.sanity-postgresql.toml` | PostgreSQL | max_throughput | 10s + 5s warmup | 1 | Quick verification |
+| `config.sanity-postgresql.toml` | PostgreSQL (standard) | max_throughput | 10s + 5s warmup | 1 | Quick verification |
+| `config.sanity-postgresql-atomic.toml` | PostgreSQL (atomic) | max_throughput | 10s + 5s warmup | 1 | Quick verification |
 | `config.sanity-postgresql-batched.toml` | PostgreSQL (batched) | max_throughput | 10s + 5s warmup | 1 | Quick verification |
 | `config.sanity-tigerbeetle.toml` | TigerBeetle | max_throughput | 10s + 5s warmup | 1 | Quick verification |
-| `config.local-postgresql.toml` | PostgreSQL | max_throughput | 5min + 2min warmup | 3 | Proper local test |
+| `config.local-postgresql.toml` | PostgreSQL (standard) | max_throughput | 5min + 2min warmup | 3 | Proper local test |
+| `config.local-postgresql-atomic.toml` | PostgreSQL (atomic) | max_throughput | 5min + 2min warmup | 3 | Proper local test |
 | `config.local-postgresql-batched.toml` | PostgreSQL (batched) | max_throughput | 5min + 2min warmup | 3 | Proper local test |
 | `config.local-tigerbeetle.toml` | TigerBeetle | max_throughput | 5min + 2min warmup | 3 | Proper local test |
 | `config.cloud-tigerbeetle-fixedrate.toml` | TigerBeetle | fixed_rate | 5min + 2min warmup | 3 | Cloud example |
@@ -125,7 +125,7 @@ type = "postgresql"  # or "tigerbeetle"
 isolation_level = "read_committed"  # or "repeatable_read", "serializable"
 connection_pool_size = 20
 connection_pool_min_idle = 20
-batched_mode = false                # true for TigerBeetle-like batching
+executor_mode = "standard"          # "standard" (FOR UPDATE), "atomic", or "batched"
 
 [tigerbeetle]
 cluster_addresses = ["3000"]        # Host:port for each replica

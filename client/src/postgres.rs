@@ -118,6 +118,128 @@ pub async fn create_workload(
     ))
 }
 
+// ============================================================================
+// Atomic PostgreSQL Executor (no explicit locks)
+// ============================================================================
+
+/// PostgreSQL executor using atomic UPDATE (no SELECT FOR UPDATE)
+///
+/// Uses the `transfer_atomic` SQL function which relies on atomic UPDATE
+/// statements with balance checks in the WHERE clause. Safe at READ COMMITTED.
+#[derive(Clone)]
+pub struct AtomicPostgresExecutor {
+    pool: Pool,
+    isolation_level: IsolationLevel,
+}
+
+#[async_trait]
+impl TransferExecutor for AtomicPostgresExecutor {
+    async fn execute(&self, source: u64, dest: u64, amount: u64) -> Result<TransferResult> {
+        execute_atomic_transfer(&self.pool, &self.isolation_level, source, dest, amount).await
+    }
+}
+
+/// Create an atomic PostgreSQL workload runner
+pub async fn create_atomic_workload(
+    pg_config: &PostgresqlConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+    user: &str,
+    password: &str,
+    num_accounts: u64,
+    zipfian_exponent: f64,
+    min_transfer_amount: u64,
+    max_transfer_amount: u64,
+    warmup_duration_secs: u64,
+    test_duration_secs: u64,
+    metrics: WorkloadMetrics,
+) -> Result<WorkloadRunner<AtomicPostgresExecutor>> {
+    let mgr = create_pool_manager(host, port, database, user, password);
+
+    let pool = Pool::builder(mgr)
+        .max_size(pg_config.connection_pool_size)
+        .build()
+        .context("Failed to create connection pool")?;
+
+    // Pre-warm connection pool
+    info!(
+        "Pre-warming connection pool with {} connections",
+        pg_config.connection_pool_size
+    );
+    let mut handles = Vec::new();
+    for _ in 0..pg_config.connection_pool_size {
+        let pool = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = pool.get().await;
+        }));
+    }
+    for handle in handles {
+        let _ = handle.await;
+    }
+    info!("Connection pool warmed up");
+
+    let executor = AtomicPostgresExecutor {
+        pool,
+        isolation_level: pg_config.isolation_level.clone(),
+    };
+
+    Ok(WorkloadRunner::new(
+        executor,
+        num_accounts,
+        zipfian_exponent,
+        min_transfer_amount,
+        max_transfer_amount,
+        warmup_duration_secs,
+        test_duration_secs,
+        metrics,
+    ))
+}
+
+/// Execute an atomic transfer (no explicit locks)
+async fn execute_atomic_transfer(
+    pool: &Pool,
+    isolation_level: &IsolationLevel,
+    source: u64,
+    dest: u64,
+    amount: u64,
+) -> Result<TransferResult> {
+    use tokio_postgres::SimpleQueryMessage;
+
+    let client = pool.get().await.context("Failed to get connection")?;
+
+    let isolation_level_str = isolation_level.as_sql_str();
+
+    // Execute the atomic transfer function
+    // Uses simple_query to execute multiple statements (BEGIN, SELECT, COMMIT)
+    let sql = format!(
+        "BEGIN TRANSACTION ISOLATION LEVEL {}; \
+         SELECT transfer_atomic({}, {}, {}); \
+         COMMIT;",
+        isolation_level_str, source, dest, amount
+    );
+
+    let messages = client.simple_query(&sql).await?;
+
+    // Find the row with the transfer result
+    for msg in messages {
+        if let SimpleQueryMessage::Row(row) = msg {
+            let status = row.get(0).context("Missing transfer result")?;
+            return match status {
+                sql_results::SUCCESS => Ok(TransferResult::Success),
+                sql_results::INSUFFICIENT_BALANCE => Ok(TransferResult::InsufficientBalance),
+                sql_results::ACCOUNT_NOT_FOUND => Ok(TransferResult::AccountNotFound),
+                _ => {
+                    warn!("Unexpected transfer result: {}", status);
+                    Ok(TransferResult::Failed)
+                }
+            };
+        }
+    }
+
+    anyhow::bail!("No result from transfer_atomic function")
+}
+
 /// Check if an error is a serialization failure using SQLSTATE code
 fn is_serialization_failure(err: &anyhow::Error) -> bool {
     // Try to extract the underlying tokio_postgres error and check db error code

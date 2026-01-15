@@ -1,25 +1,25 @@
-# Sanity-check configuration for PostgreSQL batched mode
-# Quick 30-second test to verify batched mode works correctly
+# Local PostgreSQL atomic mode test configuration
+# Uses atomic UPDATE with balance check (no explicit locks)
 
 [workload]
 test_mode = "max_throughput"
-concurrency = 4
-num_accounts = 1000
+concurrency = 10
+num_accounts = 100000
 zipfian_exponent = 1.0
 initial_balance = 1000000
 min_transfer_amount = 1
 max_transfer_amount = 1000
-warmup_duration_secs = 5
-test_duration_secs = 10
+warmup_duration_secs = 120
+test_duration_secs = 300
 
 [database]
 type = "postgresql"
 
 [postgresql]
 isolation_level = "read_committed"
-connection_pool_size = 1  # Ignored in batched mode (single connection used)
-connection_pool_min_idle = 1
-executor_mode = "batched"  # Options: standard, atomic, batched
+connection_pool_size = 20
+connection_pool_min_idle = 20
+executor_mode = "atomic"  # Uses atomic UPDATE, no explicit locks
 
 [deployment]
 type = "local"
@@ -27,7 +27,7 @@ num_db_nodes = 1
 measure_network_latency = false
 
 [coordinator]
-test_runs = 1
+test_runs = 3
 max_variance_threshold = 0.10
 max_error_rate = 0.05
 metrics_export_path = "./results"

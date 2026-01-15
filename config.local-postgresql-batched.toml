@@ -19,7 +19,7 @@ type = "postgresql"
 isolation_level = "read_committed"
 connection_pool_size = 1  # Ignored in batched mode (single connection used)
 connection_pool_min_idle = 1
-batched_mode = true  # Enable batched executor (single connection, batch transfers)
+executor_mode = "batched"  # Options: standard, atomic, batched
 
 [deployment]
 type = "local"

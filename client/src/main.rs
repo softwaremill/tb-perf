@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use tb_perf_common::Config;
-use tb_perf_common::config::{DatabaseType, TestMode};
+use tb_perf_common::config::{DatabaseType, PostgresExecutorMode, TestMode};
 use tracing::info;
 
 mod metrics;
@@ -85,8 +85,8 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
         .context("PostgreSQL config missing (should have been validated)")?;
 
     info!("  Isolation level: {:?}", pg_config.isolation_level);
-    info!("  Batched mode: {}", pg_config.batched_mode);
-    if !pg_config.batched_mode {
+    info!("  Executor mode: {:?}", pg_config.executor_mode);
+    if pg_config.executor_mode != PostgresExecutorMode::Batched {
         info!("  Connection pool size: {}", pg_config.connection_pool_size);
     }
 
@@ -94,20 +94,26 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
     let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
-    let db_type_label = if pg_config.batched_mode {
-        "postgresql_batched"
-    } else {
-        "postgresql"
+    let db_type_label = match pg_config.executor_mode {
+        PostgresExecutorMode::Standard => "postgresql",
+        PostgresExecutorMode::Atomic => "postgresql_atomic",
+        PostgresExecutorMode::Batched => "postgresql_batched",
     };
     let metrics = WorkloadMetrics::new(&args.otel_endpoint, db_type_label, test_mode_str)
         .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
-    // Run workload based on batched mode
-    let result = if pg_config.batched_mode {
-        run_batched_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
-    } else {
-        run_standard_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+    // Run workload based on executor mode
+    let result = match pg_config.executor_mode {
+        PostgresExecutorMode::Standard => {
+            run_standard_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+        }
+        PostgresExecutorMode::Atomic => {
+            run_atomic_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+        }
+        PostgresExecutorMode::Batched => {
+            run_batched_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+        }
     };
 
     // Shutdown OpenTelemetry provider to flush remaining metrics
@@ -142,6 +148,46 @@ async fn run_standard_postgresql_workload(
     )
     .await
     .context("Failed to create PostgreSQL workload")?;
+
+    // Run workload based on test mode
+    match test_mode {
+        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(*concurrency).await,
+        TestMode::FixedRate {
+            target_rate,
+            max_concurrency,
+        } => {
+            workload
+                .run_fixed_rate(*target_rate, *max_concurrency)
+                .await
+        }
+    }
+}
+
+async fn run_atomic_postgresql_workload(
+    config: &Config,
+    args: &Args,
+    pg_config: &tb_perf_common::config::PostgresqlConfig,
+    test_mode: &TestMode,
+    metrics: WorkloadMetrics,
+) -> Result<()> {
+    // Create atomic workload runner (no explicit locks, uses atomic UPDATE)
+    let workload = postgres::create_atomic_workload(
+        pg_config,
+        &args.pg_host,
+        args.pg_port,
+        "tbperf",
+        "postgres",
+        "postgres",
+        config.workload.num_accounts,
+        config.workload.zipfian_exponent,
+        config.workload.min_transfer_amount,
+        config.workload.max_transfer_amount,
+        config.workload.warmup_duration_secs,
+        config.workload.test_duration_secs,
+        metrics,
+    )
+    .await
+    .context("Failed to create atomic PostgreSQL workload")?;
 
     // Run workload based on test mode
     match test_mode {

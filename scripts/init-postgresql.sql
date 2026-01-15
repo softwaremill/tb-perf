@@ -90,6 +90,54 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- Atomic transfer function (no explicit locks)
+-- Uses atomic UPDATE with balance check in WHERE clause
+-- Safe at READ COMMITTED due to row-level locking during UPDATE
+-- Returns: 'success', 'insufficient_balance', or 'account_not_found'
+CREATE OR REPLACE FUNCTION transfer_atomic(
+    p_source_id BIGINT,
+    p_dest_id BIGINT,
+    p_amount BIGINT
+) RETURNS TEXT AS $$
+DECLARE
+    v_updated INT;
+BEGIN
+    -- Atomic debit: only succeeds if sufficient balance
+    -- The UPDATE acquires a row lock, reads current balance, checks condition, writes
+    UPDATE accounts SET balance = balance - p_amount
+    WHERE id = p_source_id AND balance >= p_amount;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+
+    IF v_updated = 0 THEN
+        -- Either account doesn't exist or insufficient balance
+        -- Check which one
+        PERFORM 1 FROM accounts WHERE id = p_source_id;
+        IF NOT FOUND THEN
+            RETURN 'account_not_found';
+        ELSE
+            RETURN 'insufficient_balance';
+        END IF;
+    END IF;
+
+    -- Atomic credit: balance = balance + amount is safe for concurrent updates
+    UPDATE accounts SET balance = balance + p_amount WHERE id = p_dest_id;
+
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+
+    IF v_updated = 0 THEN
+        -- Destination doesn't exist - rollback the debit
+        -- This will be handled by transaction rollback
+        RAISE EXCEPTION 'account_not_found';
+    END IF;
+
+    -- Record the transfer
+    INSERT INTO transfers (source_id, dest_id, amount) VALUES (p_source_id, p_dest_id, p_amount);
+
+    RETURN 'success';
+END;
+$$ LANGUAGE plpgsql;
+
 -- Batch transfer function for batched executor
 -- Processes multiple transfers in a single call, each in its own subtransaction
 -- Input: Three parallel arrays (source_ids, dest_ids, amounts)
