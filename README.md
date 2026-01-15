@@ -26,87 +26,36 @@ tb-perf/
 - Terraform (for cloud deployments)
 - AWS credentials (for cloud deployments)
 
-### Build
-
-```bash
-cargo build --release
-```
-
 ## Running Tests
 
-> **Note:** TigerBeetle uses port 3000 for its API, so when running TigerBeetle tests, Grafana is available on port 3001 instead of 3000.
-
-### Sanity Check (Quick 30-second Test)
-
-Use sanity-check configurations to verify your setup works before running longer tests.
-
-**PostgreSQL Sanity Check:**
 ```bash
-# Option 1: Let coordinator manage Docker
+# PostgreSQL sanity check (~30 seconds)
 cargo run --release --bin coordinator -- -c config.sanity-postgresql.toml
 
-# Option 2: Start Docker manually, then run with --no-docker
-docker compose -f docker/docker-compose.postgresql.yml up -d
-cargo run --release --bin coordinator -- -c config.sanity-postgresql.toml --no-docker
-
-# View results in Grafana at http://localhost:3000
-```
-
-**TigerBeetle Sanity Check:**
-```bash
-# Option 1: Let coordinator manage Docker
+# TigerBeetle sanity check (~30 seconds)
 cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml
 
-# Option 2: Start Docker manually, then run with --no-docker
-docker compose -f docker/docker-compose.tigerbeetle.yml up -d
-cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml --no-docker
-
-# View results in Grafana at http://localhost:3001
-# (TigerBeetle uses port 3000, so Grafana is on 3001)
-```
-
-### Proper Local Test (5-minute Measurement, 3 Runs)
-
-**PostgreSQL Full Test:**
-```bash
-# Run the full test suite (takes ~25 minutes: 3 runs x (2min warmup + 5min test))
-# Coordinator automatically manages Docker
+# PostgreSQL full test (~25 minutes)
 cargo run --release --bin coordinator -- -c config.local-postgresql.toml
 
-# Results are exported to ./results/ as JSON
-```
-
-**TigerBeetle Full Test:**
-```bash
-# Run the full test suite
-# Coordinator automatically manages Docker
+# TigerBeetle full test (~25 minutes)
 cargo run --release --bin coordinator -- -c config.local-tigerbeetle.toml
-
-# Results are exported to ./results/ as JSON
 ```
 
-### Cleanup
+The coordinator automatically builds, manages Docker, and exports results to `./results/`.
 
+**Options:**
+- `--keep-running` - Keep Grafana/Prometheus running after test
+- `--no-docker` - Skip Docker management (if containers already running)
+
+**Cleanup between runs:**
 ```bash
-# Stop PostgreSQL stack
-./scripts/stop-docker.sh postgresql
-
-# Stop TigerBeetle stack
-./scripts/stop-docker.sh tigerbeetle
-
-# Stop both stacks
 ./scripts/stop-docker.sh all
 ```
 
-### Keep Grafana Running After Test
-
-Add `--keep-running` flag to keep the infrastructure running after the test:
-
-```bash
-cargo run --release --bin coordinator -- -c config.local-postgresql.toml --keep-running
-```
-
-Or set `keep_grafana_running = true` in the configuration file.
+**Grafana dashboards:**
+- PostgreSQL tests: http://localhost:3000
+- TigerBeetle tests: http://localhost:3001 (TigerBeetle uses port 3000)
 
 ## Configuration
 
