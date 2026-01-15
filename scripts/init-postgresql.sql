@@ -159,8 +159,8 @@ $$ LANGUAGE plpgsql;
 -- Input: Three parallel arrays (source_ids, dest_ids, amounts)
 -- Output: Array of result codes (0=success, 1=insufficient_balance, 2=account_not_found, 3=failed)
 --
--- Using integer codes instead of text for efficiency (smaller return payload)
--- Uses PL/pgSQL BEGIN...EXCEPTION blocks which create implicit savepoints
+-- Uses atomic UPDATE approach (no explicit locks) with ID ordering to prevent deadlocks.
+-- Uses PL/pgSQL BEGIN...EXCEPTION blocks which create implicit savepoints.
 --
 -- Example:
 --   SELECT batch_transfers(ARRAY[1,3], ARRAY[2,4], ARRAY[100,50]);
@@ -176,11 +176,7 @@ DECLARE
     v_source_id BIGINT;
     v_dest_id BIGINT;
     v_amount BIGINT;
-    v_source_balance BIGINT;
-    v_first_id BIGINT;
-    v_second_id BIGINT;
-    v_first_balance BIGINT;
-    v_second_balance BIGINT;
+    v_updated INT;
     v_len INT;
     v_idx INT;
 BEGIN
@@ -207,33 +203,46 @@ BEGIN
 
         -- Each transfer in its own BEGIN...EXCEPTION block (implicit savepoint)
         BEGIN
-            -- Determine lock order (always lock lower ID first to prevent deadlocks)
             IF v_source_id < v_dest_id THEN
-                v_first_id := v_source_id;
-                v_second_id := v_dest_id;
+                -- Source has lower ID: debit first, then credit
+                UPDATE accounts SET balance = balance - v_amount
+                WHERE id = v_source_id AND balance >= v_amount;
+                GET DIAGNOSTICS v_updated = ROW_COUNT;
+                IF v_updated = 0 THEN
+                    PERFORM 1 FROM accounts WHERE id = v_source_id;
+                    IF NOT FOUND THEN
+                        RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+                    ELSE
+                        RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'TB001';
+                    END IF;
+                END IF;
+
+                UPDATE accounts SET balance = balance + v_amount WHERE id = v_dest_id;
+                GET DIAGNOSTICS v_updated = ROW_COUNT;
+                IF v_updated = 0 THEN
+                    RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+                END IF;
             ELSE
-                v_first_id := v_dest_id;
-                v_second_id := v_source_id;
+                -- Dest has lower ID: credit first, then debit
+                -- If debit fails, exception rolls back to implicit savepoint
+                UPDATE accounts SET balance = balance + v_amount WHERE id = v_dest_id;
+                GET DIAGNOSTICS v_updated = ROW_COUNT;
+                IF v_updated = 0 THEN
+                    RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+                END IF;
+
+                UPDATE accounts SET balance = balance - v_amount
+                WHERE id = v_source_id AND balance >= v_amount;
+                GET DIAGNOSTICS v_updated = ROW_COUNT;
+                IF v_updated = 0 THEN
+                    PERFORM 1 FROM accounts WHERE id = v_source_id;
+                    IF NOT FOUND THEN
+                        RAISE EXCEPTION 'account_not_found' USING ERRCODE = 'TB002';
+                    ELSE
+                        RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'TB001';
+                    END IF;
+                END IF;
             END IF;
-
-            -- Lock both accounts in consistent order and verify they exist
-            SELECT balance INTO STRICT v_first_balance FROM accounts WHERE id = v_first_id FOR UPDATE;
-            SELECT balance INTO STRICT v_second_balance FROM accounts WHERE id = v_second_id FOR UPDATE;
-
-            -- Get source balance (may be first or second depending on order)
-            IF v_source_id = v_first_id THEN
-                v_source_balance := v_first_balance;
-            ELSE
-                v_source_balance := v_second_balance;
-            END IF;
-
-            IF v_source_balance < v_amount THEN
-                RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'P0001';
-            END IF;
-
-            -- Perform the transfer
-            UPDATE accounts SET balance = balance - v_amount WHERE id = v_source_id;
-            UPDATE accounts SET balance = balance + v_amount WHERE id = v_dest_id;
 
             -- Record the transfer
             INSERT INTO transfers (source_id, dest_id, amount) VALUES (v_source_id, v_dest_id, v_amount);
@@ -242,10 +251,10 @@ BEGIN
             v_results := array_append(v_results, v_result);
 
         EXCEPTION
-            WHEN NO_DATA_FOUND THEN
+            WHEN SQLSTATE 'TB002' THEN
                 v_result := 2;  -- account_not_found
                 v_results := array_append(v_results, v_result);
-            WHEN SQLSTATE 'P0001' THEN
+            WHEN SQLSTATE 'TB001' THEN
                 v_result := 1;  -- insufficient_balance
                 v_results := array_append(v_results, v_result);
             WHEN OTHERS THEN
