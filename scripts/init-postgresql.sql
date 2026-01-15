@@ -91,11 +91,12 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Batch transfer function for batched executor
--- Processes multiple transfers in a single call, each with its own savepoint
+-- Processes multiple transfers in a single call, each in its own subtransaction
 -- Input: Three parallel arrays (source_ids, dest_ids, amounts)
 -- Output: Array of result codes (0=success, 1=insufficient_balance, 2=account_not_found, 3=failed)
 --
 -- Using integer codes instead of text for efficiency (smaller return payload)
+-- Uses PL/pgSQL BEGIN...EXCEPTION blocks which create implicit savepoints
 --
 -- Example:
 --   SELECT batch_transfers(ARRAY[1,3], ARRAY[2,4], ARRAY[100,50]);
@@ -140,10 +141,8 @@ BEGIN
         v_dest_id := p_dest_ids[v_idx];
         v_amount := p_amounts[v_idx];
 
-        -- Each transfer gets its own savepoint for independent failure handling
+        -- Each transfer in its own BEGIN...EXCEPTION block (implicit savepoint)
         BEGIN
-            SAVEPOINT transfer_sp;
-
             -- Determine lock order (always lock lower ID first to prevent deadlocks)
             IF v_source_id < v_dest_id THEN
                 v_first_id := v_source_id;
@@ -154,21 +153,8 @@ BEGIN
             END IF;
 
             -- Lock both accounts in consistent order and verify they exist
-            SELECT balance INTO v_first_balance FROM accounts WHERE id = v_first_id FOR UPDATE;
-            IF NOT FOUND THEN
-                v_result := 2;  -- account_not_found
-                ROLLBACK TO SAVEPOINT transfer_sp;
-                v_results := array_append(v_results, v_result);
-                CONTINUE;
-            END IF;
-
-            SELECT balance INTO v_second_balance FROM accounts WHERE id = v_second_id FOR UPDATE;
-            IF NOT FOUND THEN
-                v_result := 2;  -- account_not_found
-                ROLLBACK TO SAVEPOINT transfer_sp;
-                v_results := array_append(v_results, v_result);
-                CONTINUE;
-            END IF;
+            SELECT balance INTO STRICT v_first_balance FROM accounts WHERE id = v_first_id FOR UPDATE;
+            SELECT balance INTO STRICT v_second_balance FROM accounts WHERE id = v_second_id FOR UPDATE;
 
             -- Get source balance (may be first or second depending on order)
             IF v_source_id = v_first_id THEN
@@ -178,10 +164,7 @@ BEGIN
             END IF;
 
             IF v_source_balance < v_amount THEN
-                v_result := 1;  -- insufficient_balance
-                ROLLBACK TO SAVEPOINT transfer_sp;
-                v_results := array_append(v_results, v_result);
-                CONTINUE;
+                RAISE EXCEPTION 'insufficient_balance' USING ERRCODE = 'P0001';
             END IF;
 
             -- Perform the transfer
@@ -192,14 +175,18 @@ BEGIN
             INSERT INTO transfers (source_id, dest_id, amount) VALUES (v_source_id, v_dest_id, v_amount);
 
             v_result := 0;  -- success
-            RELEASE SAVEPOINT transfer_sp;
             v_results := array_append(v_results, v_result);
 
-        EXCEPTION WHEN OTHERS THEN
-            -- Handle any unexpected errors
-            ROLLBACK TO SAVEPOINT transfer_sp;
-            v_result := 3;  -- failed
-            v_results := array_append(v_results, v_result);
+        EXCEPTION
+            WHEN NO_DATA_FOUND THEN
+                v_result := 2;  -- account_not_found
+                v_results := array_append(v_results, v_result);
+            WHEN SQLSTATE 'P0001' THEN
+                v_result := 1;  -- insufficient_balance
+                v_results := array_append(v_results, v_result);
+            WHEN OTHERS THEN
+                v_result := 3;  -- failed
+                v_results := array_append(v_results, v_result);
         END;
     END LOOP;
 
