@@ -106,6 +106,46 @@ async fn run_local_tests(config: &Config, args: &Args, run_ctx: &RunContext) -> 
 
     let docker = DockerManager::new(&compose_file, "tbperf");
 
+    // Run the test with cleanup guard to always save logs
+    let test_result = run_local_tests_inner(config, args, run_ctx, &docker).await;
+
+    // Always save docker logs, regardless of test result
+    if !args.no_docker {
+        if let Err(e) = docker.save_logs_to_file(&run_ctx.docker_log_path).await {
+            warn!("Failed to save docker logs: {:?}", e);
+        } else {
+            info!("Docker logs saved to: {}", run_ctx.docker_log_path.display());
+        }
+    }
+
+    // Cleanup - stop docker unless keeping running
+    let keep_running = args.keep_running || config.coordinator.keep_grafana_running;
+    if !keep_running && !args.no_docker {
+        if let Err(e) = docker.stop().await {
+            warn!("Failed to stop Docker: {:?}", e);
+        }
+    } else if !args.no_docker {
+        info!("Keeping infrastructure running");
+        info!(
+            "  Grafana: http://localhost:{}",
+            config.monitoring.grafana_port
+        );
+        info!(
+            "  Prometheus: http://localhost:{}",
+            config.monitoring.prometheus_port
+        );
+    }
+
+    // Return the actual test result
+    test_result
+}
+
+async fn run_local_tests_inner(
+    config: &Config,
+    args: &Args,
+    run_ctx: &RunContext,
+    docker: &DockerManager,
+) -> Result<()> {
     // Start infrastructure
     if !args.no_docker {
         docker.start().await?;
@@ -134,29 +174,6 @@ async fn run_local_tests(config: &Config, args: &Args, run_ctx: &RunContext) -> 
     // Print and export results
     results.print_summary();
     results.export_json(run_ctx.results_path().to_str().unwrap())?;
-
-    // Save docker logs directly to file
-    if !args.no_docker
-        && let Err(e) = docker.save_logs_to_file(&run_ctx.docker_log_path).await
-    {
-        warn!("Failed to save docker logs: {:?}", e);
-    }
-
-    // Cleanup
-    let keep_running = args.keep_running || config.coordinator.keep_grafana_running;
-    if !keep_running && !args.no_docker {
-        docker.stop().await?;
-    } else {
-        info!("Keeping infrastructure running");
-        info!(
-            "  Grafana: http://localhost:{}",
-            config.monitoring.grafana_port
-        );
-        info!(
-            "  Prometheus: http://localhost:{}",
-            config.monitoring.prometheus_port
-        );
-    }
 
     Ok(())
 }

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11

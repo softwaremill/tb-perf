@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Manages Docker Compose infrastructure
 #[derive(Clone)]
@@ -79,6 +79,51 @@ impl DockerManager {
         Ok(())
     }
 
+    /// Check if a container has crashed (exited/dead state)
+    /// Returns Some(true) if container is running
+    /// Returns Some(false) if container has crashed (exited/dead)
+    /// Returns None if container state is unknown (not yet started, etc.)
+    async fn check_container_status(&self, service: &str) -> Result<Option<bool>> {
+        let output = Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                &self.compose_file,
+                "-p",
+                &self.project_name,
+                "ps",
+                "-a", // Include stopped/exited containers
+                "--format",
+                "{{.State}}",
+                service,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to check container status")?;
+
+        let state = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+
+        // Container states: running, exited, created, paused, restarting, dead
+        if state.is_empty() {
+            // Container doesn't exist yet
+            return Ok(None);
+        }
+
+        if state.contains("exited") || state.contains("dead") {
+            // Container has crashed or stopped
+            return Ok(Some(false));
+        }
+
+        if state.contains("running") {
+            return Ok(Some(true));
+        }
+
+        // Container is in created, restarting, or other transitional state
+        Ok(None)
+    }
+
     /// Wait for PostgreSQL to be ready
     async fn wait_for_postgres(&self, timeout: Duration) -> Result<()> {
         info!("Waiting for PostgreSQL to be ready...");
@@ -87,6 +132,25 @@ impl DockerManager {
         loop {
             if start.elapsed() > timeout {
                 anyhow::bail!("Timeout waiting for PostgreSQL to be ready");
+            }
+
+            // Check if container has crashed (only fail if definitely dead)
+            match self.check_container_status("postgres").await {
+                Ok(Some(false)) => {
+                    // Container crashed - get logs for context
+                    let logs = self.get_service_logs("postgres").await.unwrap_or_default();
+                    let log_tail: String = logs.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                    anyhow::bail!(
+                        "PostgreSQL container exited unexpectedly. Last logs:\n{}",
+                        log_tail
+                    );
+                }
+                Ok(Some(true)) | Ok(None) => {
+                    // Running or still starting - continue waiting
+                }
+                Err(e) => {
+                    warn!("Failed to check container status: {}", e);
+                }
             }
 
             let output = Command::new("docker")
@@ -105,18 +169,26 @@ impl DockerManager {
                     "-d",
                     "tbperf",
                 ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
                 .await;
 
             match output {
-                Ok(status) if status.success() => {
+                Ok(out) if out.status.success() => {
                     info!("PostgreSQL is ready");
                     return Ok(());
                 }
-                _ => {
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stderr.is_empty() {
+                        debug!("pg_isready stderr: {}", stderr.trim());
+                    }
                     debug!("PostgreSQL not ready yet, retrying...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    debug!("pg_isready failed: {}, retrying...", e);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
@@ -136,6 +208,25 @@ impl DockerManager {
                 anyhow::bail!("Timeout waiting for TigerBeetle to be ready");
             }
 
+            // Check if container has crashed (only fail if definitely dead)
+            match self.check_container_status("tigerbeetle").await {
+                Ok(Some(false)) => {
+                    // Container crashed - get logs for context
+                    let logs = self.get_service_logs("tigerbeetle").await.unwrap_or_default();
+                    let log_tail: String = logs.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                    anyhow::bail!(
+                        "TigerBeetle container exited unexpectedly. Last logs:\n{}",
+                        log_tail
+                    );
+                }
+                Ok(Some(true)) | Ok(None) => {
+                    // Running or still starting - continue waiting
+                }
+                Err(e) => {
+                    warn!("Failed to check container status: {}", e);
+                }
+            }
+
             // Check if the TigerBeetle process is running in the container
             // (TigerBeetle's minimal image doesn't include nc or curl)
             let output = Command::new("docker")
@@ -151,22 +242,56 @@ impl DockerManager {
                     "pgrep",
                     "tigerbeetle",
                 ])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
                 .await;
 
             match output {
-                Ok(status) if status.success() => {
+                Ok(out) if out.status.success() => {
                     info!("TigerBeetle is ready");
                     return Ok(());
                 }
-                _ => {
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stderr.is_empty() {
+                        debug!("pgrep stderr: {}", stderr.trim());
+                    }
                     debug!("TigerBeetle not ready yet, retrying...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    debug!("pgrep failed: {}, retrying...", e);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             }
         }
+    }
+
+    /// Get logs from a specific service
+    async fn get_service_logs(&self, service: &str) -> Result<String> {
+        let output = Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                &self.compose_file,
+                "-p",
+                &self.project_name,
+                "logs",
+                "--no-color",
+                service,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to get service logs")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Combine stdout and stderr
+        Ok(format!("{}{}", stdout, stderr))
     }
 
     /// Wait for PostgreSQL services to be healthy
