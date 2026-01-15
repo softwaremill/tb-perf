@@ -2,6 +2,21 @@ use crate::docker::DockerManager;
 use anyhow::{Context, Result};
 use tracing::info;
 
+/// Initialize PostgreSQL schema by running the init script.
+/// This creates tables and stored procedures.
+/// Safe to run multiple times (uses CREATE TABLE IF NOT EXISTS and CREATE OR REPLACE).
+pub async fn init_schema(docker: &DockerManager) -> Result<()> {
+    info!("Initializing PostgreSQL schema from init-postgresql.sql...");
+
+    docker
+        .exec_postgres_file("/docker-entrypoint-initdb.d/init.sql")
+        .await
+        .context("Failed to run init-postgresql.sql")?;
+
+    info!("PostgreSQL schema initialized");
+    Ok(())
+}
+
 /// Reset database to initial state with consistent conditions.
 /// Used for both initial setup and between-run resets.
 /// Ensures each run starts with identical conditions (checkpoint + vacuum analyze).

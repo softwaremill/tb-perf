@@ -433,6 +433,41 @@ impl DockerManager {
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
+
+    /// Execute a SQL file in the postgres container
+    /// The file path is relative to the container's filesystem
+    pub async fn exec_postgres_file(&self, file_path: &str) -> Result<()> {
+        let output = Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                &self.compose_file,
+                "-p",
+                &self.project_name,
+                "exec",
+                "-T",
+                "postgres",
+                "psql",
+                "-U",
+                "postgres",
+                "-d",
+                "tbperf",
+                "-f",
+                file_path,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .context("Failed to execute psql file")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("psql file execution failed: {}", stderr);
+        }
+
+        Ok(())
+    }
 }
 
 /// Find the docker compose file relative to the config file

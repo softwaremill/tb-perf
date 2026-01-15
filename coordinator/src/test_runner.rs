@@ -53,6 +53,8 @@ impl<'a> TestRunner<'a> {
         // Initialize database based on type
         match self.config.database.kind {
             DatabaseType::PostgreSQL => {
+                // Initialize schema (creates tables and stored procedures)
+                postgres_setup::init_schema(&self.docker).await?;
                 postgres_setup::reset_database(&self.docker, num_accounts, initial_balance).await?;
             }
             DatabaseType::TigerBeetle => {
