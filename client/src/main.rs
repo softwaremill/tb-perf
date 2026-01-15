@@ -84,17 +84,46 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
         .context("PostgreSQL config missing (should have been validated)")?;
 
     info!("  Isolation level: {:?}", pg_config.isolation_level);
-    info!("  Connection pool size: {}", pg_config.connection_pool_size);
+    info!("  Batched mode: {}", pg_config.batched_mode);
+    if !pg_config.batched_mode {
+        info!("  Connection pool size: {}", pg_config.connection_pool_size);
+    }
 
     let test_mode = config.workload.test_mode()?;
     let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
-    let metrics = WorkloadMetrics::new(&args.otel_endpoint, "postgresql", test_mode_str)
+    let db_type_label = if pg_config.batched_mode {
+        "postgresql_batched"
+    } else {
+        "postgresql"
+    };
+    let metrics = WorkloadMetrics::new(&args.otel_endpoint, db_type_label, test_mode_str)
         .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
-    // Create workload runner
+    // Run workload based on batched mode
+    let result = if pg_config.batched_mode {
+        run_batched_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+    } else {
+        run_standard_postgresql_workload(config, args, pg_config, &test_mode, metrics).await
+    };
+
+    // Shutdown OpenTelemetry provider to flush remaining metrics
+    info!("Shutting down metrics provider...");
+    metrics_for_shutdown.shutdown();
+
+    result
+}
+
+async fn run_standard_postgresql_workload(
+    config: &Config,
+    args: &Args,
+    pg_config: &tb_perf_common::config::PostgresqlConfig,
+    test_mode: &TestMode,
+    metrics: WorkloadMetrics,
+) -> Result<()> {
+    // Create standard workload runner
     let workload = postgres::create_workload(
         pg_config,
         &args.pg_host,
@@ -114,19 +143,57 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
     .context("Failed to create PostgreSQL workload")?;
 
     // Run workload based on test mode
-    let result = match test_mode {
-        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(concurrency).await,
+    match test_mode {
+        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(*concurrency).await,
         TestMode::FixedRate {
             target_rate,
             max_concurrency,
-        } => workload.run_fixed_rate(target_rate, max_concurrency).await,
-    };
+        } => {
+            workload
+                .run_fixed_rate(*target_rate, *max_concurrency)
+                .await
+        }
+    }
+}
 
-    // Shutdown OpenTelemetry provider to flush remaining metrics
-    info!("Shutting down metrics provider...");
-    metrics_for_shutdown.shutdown();
+async fn run_batched_postgresql_workload(
+    config: &Config,
+    args: &Args,
+    pg_config: &tb_perf_common::config::PostgresqlConfig,
+    test_mode: &TestMode,
+    metrics: WorkloadMetrics,
+) -> Result<()> {
+    // Create batched workload runner
+    let workload = postgres::create_batched_workload(
+        pg_config,
+        &args.pg_host,
+        args.pg_port,
+        "tbperf",
+        "postgres",
+        "postgres",
+        config.workload.num_accounts,
+        config.workload.zipfian_exponent,
+        config.workload.min_transfer_amount,
+        config.workload.max_transfer_amount,
+        config.workload.warmup_duration_secs,
+        config.workload.test_duration_secs,
+        metrics,
+    )
+    .await
+    .context("Failed to create batched PostgreSQL workload")?;
 
-    result
+    // Run workload based on test mode
+    match test_mode {
+        TestMode::MaxThroughput { concurrency } => workload.run_max_throughput(*concurrency).await,
+        TestMode::FixedRate {
+            target_rate,
+            max_concurrency,
+        } => {
+            workload
+                .run_fixed_rate(*target_rate, *max_concurrency)
+                .await
+        }
+    }
 }
 
 async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {

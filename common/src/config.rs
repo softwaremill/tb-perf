@@ -99,6 +99,9 @@ pub struct PostgresqlConfig {
     pub connection_pool_min_idle: Option<usize>,
     pub pool_recycling_method: PoolRecyclingMethod,
     pub auto_vacuum: bool,
+    /// Enable batched mode (single connection, batch transfers like TigerBeetle)
+    #[serde(default)]
+    pub batched_mode: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -107,6 +110,17 @@ pub enum IsolationLevel {
     ReadCommitted,
     RepeatableRead,
     Serializable,
+}
+
+impl IsolationLevel {
+    /// Convert to SQL syntax string for SET TRANSACTION ISOLATION LEVEL
+    pub fn as_sql_str(&self) -> &'static str {
+        match self {
+            IsolationLevel::ReadCommitted => "READ COMMITTED",
+            IsolationLevel::RepeatableRead => "REPEATABLE READ",
+            IsolationLevel::Serializable => "SERIALIZABLE",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -291,6 +305,7 @@ mod tests {
                 connection_pool_min_idle: Some(20),
                 pool_recycling_method: PoolRecyclingMethod::Verified,
                 auto_vacuum: false,
+                batched_mode: false,
             }),
             tigerbeetle: None,
             deployment: DeploymentConfig {
