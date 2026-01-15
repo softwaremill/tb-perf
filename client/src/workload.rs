@@ -183,7 +183,16 @@ pub fn record_transfer_result(
             metrics.record_rejected(latency_us, phase.as_str());
             completed_count.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(TransferResult::AccountNotFound) | Ok(TransferResult::Failed) | Err(_) => {
+        Ok(TransferResult::AccountNotFound) => {
+            tracing::warn!("Transfer failed: account not found");
+            metrics.record_failed(phase.as_str());
+        }
+        Ok(TransferResult::Failed) => {
+            tracing::debug!("Transfer failed (no details available)");
+            metrics.record_failed(phase.as_str());
+        }
+        Err(e) => {
+            tracing::warn!("Transfer error: {:?}", e);
             metrics.record_failed(phase.as_str());
         }
     }
