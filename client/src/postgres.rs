@@ -396,7 +396,7 @@ async fn execute_batch_transfer(
     client
         .execute(
             &format!(
-                "BEGIN; SET TRANSACTION ISOLATION LEVEL {}",
+                "BEGIN TRANSACTION ISOLATION LEVEL {}",
                 isolation_level_str
             ),
             &[],
