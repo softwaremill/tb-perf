@@ -26,11 +26,11 @@ impl AccountSelector {
         Self { num_accounts, zipf }
     }
 
-    /// Select a random account using Zipfian distribution
+    /// Select a random account using Zipfian distribution (1-based IDs)
     pub fn select_account<R: Rng>(&self, rng: &mut R) -> u64 {
-        // Zipf returns values in [1, n], we want [0, n-1]
-        let account = self.zipf.sample(rng) as u64 - 1;
-        account.min(self.num_accounts - 1)
+        // Zipf returns values in [1, n] - keep 1-based for database compatibility
+        let account = self.zipf.sample(rng) as u64;
+        account.min(self.num_accounts)
     }
 
     /// Select two different accounts for a transfer
@@ -480,10 +480,10 @@ mod tests {
         let selector = AccountSelector::new(1000, 0.0);
         let mut rng = rand::rng();
 
-        // Just verify it doesn't panic and returns valid accounts
+        // Just verify it doesn't panic and returns valid 1-based accounts
         for _ in 0..100 {
             let account = selector.select_account(&mut rng);
-            assert!(account < 1000);
+            assert!(account >= 1 && account <= 1000);
         }
     }
 
@@ -496,8 +496,8 @@ mod tests {
         let mut low_count = 0;
         for _ in 0..1000 {
             let account = selector.select_account(&mut rng);
-            assert!(account < 1000);
-            if account < 100 {
+            assert!(account >= 1 && account <= 1000);
+            if account <= 100 {
                 low_count += 1;
             }
         }
