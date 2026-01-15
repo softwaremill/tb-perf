@@ -41,7 +41,6 @@ impl TransferExecutor for PostgresExecutor {
 
 /// Create a PostgreSQL connection pool manager
 fn create_pool_manager(
-    pg_config: &PostgresqlConfig,
     host: &str,
     port: u16,
     database: &str,
@@ -55,12 +54,10 @@ fn create_pool_manager(
     pg_conn_config.user(user);
     pg_conn_config.password(password);
 
-    let recycling_method = match pg_config.pool_recycling_method {
-        tb_perf_common::config::PoolRecyclingMethod::Fast => RecyclingMethod::Fast,
-        tb_perf_common::config::PoolRecyclingMethod::Verified => RecyclingMethod::Verified,
+    // Use Verified recycling to ensure connections are valid before reuse
+    let mgr_config = ManagerConfig {
+        recycling_method: RecyclingMethod::Verified,
     };
-
-    let mgr_config = ManagerConfig { recycling_method };
     Manager::from_config(pg_conn_config, NoTls, mgr_config)
 }
 
@@ -80,7 +77,7 @@ pub async fn create_workload(
     test_duration_secs: u64,
     metrics: WorkloadMetrics,
 ) -> Result<WorkloadRunner<PostgresExecutor>> {
-    let mgr = create_pool_manager(pg_config, host, port, database, user, password);
+    let mgr = create_pool_manager(host, port, database, user, password);
 
     let pool = Pool::builder(mgr)
         .max_size(pg_config.connection_pool_size)
@@ -460,7 +457,7 @@ pub async fn create_batched_workload(
     test_duration_secs: u64,
     metrics: WorkloadMetrics,
 ) -> Result<WorkloadRunner<BatchedPostgresExecutor>> {
-    let mgr = create_pool_manager(pg_config, host, port, database, user, password);
+    let mgr = create_pool_manager(host, port, database, user, password);
 
     // For batched mode, we only need a single connection
     let pool = Pool::builder(mgr)

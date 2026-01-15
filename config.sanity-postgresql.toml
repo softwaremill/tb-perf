@@ -19,8 +19,6 @@ type = "postgresql"
 isolation_level = "read_committed"
 connection_pool_size = 8
 connection_pool_min_idle = 4
-pool_recycling_method = "verified"
-auto_vacuum = false
 
 [deployment]
 type = "local"

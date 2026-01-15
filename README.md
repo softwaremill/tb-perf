@@ -145,8 +145,7 @@ type = "postgresql"  # or "tigerbeetle"
 isolation_level = "read_committed"  # or "repeatable_read", "serializable"
 connection_pool_size = 20
 connection_pool_min_idle = 20
-pool_recycling_method = "verified"
-auto_vacuum = false
+batched_mode = false                # true for TigerBeetle-like batching
 
 [tigerbeetle]
 cluster_addresses = ["3000"]        # Host:port for each replica

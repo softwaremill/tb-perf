@@ -97,8 +97,6 @@ pub struct PostgresqlConfig {
     pub isolation_level: IsolationLevel,
     pub connection_pool_size: usize,
     pub connection_pool_min_idle: Option<usize>,
-    pub pool_recycling_method: PoolRecyclingMethod,
-    pub auto_vacuum: bool,
     /// Enable batched mode (single connection, batch transfers like TigerBeetle)
     #[serde(default)]
     pub batched_mode: bool,
@@ -123,12 +121,6 @@ impl IsolationLevel {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PoolRecyclingMethod {
-    Fast,
-    Verified,
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TigerBeetleConfig {
@@ -303,8 +295,6 @@ mod tests {
                 isolation_level: IsolationLevel::ReadCommitted,
                 connection_pool_size: 20,
                 connection_pool_min_idle: Some(20),
-                pool_recycling_method: PoolRecyclingMethod::Verified,
-                auto_vacuum: false,
                 batched_mode: false,
             }),
             tigerbeetle: None,

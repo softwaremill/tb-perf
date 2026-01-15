@@ -116,8 +116,7 @@ For `test_mode = "fixed_rate"`:
 - `synchronous_commit` - off | local | remote_write | remote_apply | on
 - `connection_pool_size` - Pool size (default: 20)
 - `connection_pool_min_idle` - Min idle connections (default: same as max)
-- `pool_recycling_method` - "Fast" | "Verified" (default: Verified)
-- `auto_vacuum` - Enable/disable (default: false)
+- `batched_mode` - Enable TigerBeetle-like batching (default: false)
 
 **`[tigerbeetle]` section** (used by clients when database.type = "tigerbeetle"):
 - `cluster_addresses` - TigerBeetle cluster connection addresses
