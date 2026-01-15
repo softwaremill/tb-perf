@@ -15,11 +15,11 @@ pub async fn reset_database(
         num_accounts, initial_balance
     );
 
-    // Truncate and re-initialize accounts
+    // Truncate and re-initialize accounts (1-based IDs to match AccountSelector)
     let sql = format!(
         "TRUNCATE transfers, accounts CASCADE; \
          INSERT INTO accounts (id, balance) \
-         SELECT generate_series(0, {} - 1), {}",
+         SELECT generate_series(1, {}), {}",
         num_accounts, initial_balance
     );
 
