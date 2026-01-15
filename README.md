@@ -57,6 +57,26 @@ The coordinator automatically builds, manages Docker, and exports results to `./
 - PostgreSQL tests: http://localhost:3000
 - TigerBeetle tests: http://localhost:3001 (TigerBeetle uses port 3000)
 
+### macOS: TigerBeetle Tests
+
+TigerBeetle in Docker requires `io_uring` which isn't available on macOS. Run TigerBeetle natively instead:
+
+```bash
+# Install TigerBeetle (one-time)
+curl -sL https://tigerbeetle.com/install.sh | bash
+
+# Start TigerBeetle locally + monitoring stack in Docker
+./scripts/tigerbeetle-local.sh start
+docker compose -f docker/docker-compose.tigerbeetle.yml -p tbperf up -d otel-collector prometheus grafana
+
+# Run test with --no-docker
+cargo run --release --bin coordinator -- -c config.sanity-tigerbeetle.toml --no-docker
+
+# Cleanup
+./scripts/tigerbeetle-local.sh wipe
+./scripts/stop-docker.sh tigerbeetle
+```
+
 ## Configuration
 
 The system uses a single TOML configuration file read by both coordinator and clients.
