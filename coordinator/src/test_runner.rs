@@ -22,6 +22,7 @@ pub struct TestRunner<'a> {
     docker: DockerManager,
     prometheus: PrometheusClient,
     run_ctx: &'a RunContext,
+    no_docker: bool,
 }
 
 impl<'a> TestRunner<'a> {
@@ -30,6 +31,7 @@ impl<'a> TestRunner<'a> {
         config_path: String,
         docker: DockerManager,
         run_ctx: &'a RunContext,
+        no_docker: bool,
     ) -> Self {
         let prometheus_url = format!("http://localhost:{}", config.monitoring.prometheus_port);
         Self {
@@ -38,6 +40,7 @@ impl<'a> TestRunner<'a> {
             docker,
             prometheus: PrometheusClient::new(&prometheus_url),
             run_ctx,
+            no_docker,
         }
     }
 
@@ -115,11 +118,17 @@ impl<'a> TestRunner<'a> {
                             .await?;
                     }
                     DatabaseType::TigerBeetle => {
-                        // TigerBeetle requires container restart for clean state
-                        self.docker.restart_service("tigerbeetle").await?;
-                        self.docker
-                            .wait_for_tigerbeetle_services(Duration::from_secs(60))
-                            .await?;
+                        // TigerBeetle requires restart for clean state
+                        if self.no_docker {
+                            // Local TigerBeetle - use script to wipe and restart
+                            tigerbeetle_setup::reset_local().await?;
+                        } else {
+                            // Docker TigerBeetle - restart container
+                            self.docker.restart_service("tigerbeetle").await?;
+                            self.docker
+                                .wait_for_tigerbeetle_services(Duration::from_secs(60))
+                                .await?;
+                        }
 
                         // Wait for TigerBeetle API to be ready (more reliable than port check)
                         let tb_config = self

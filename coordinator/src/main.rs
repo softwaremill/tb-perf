@@ -168,7 +168,13 @@ async fn run_local_tests_inner(
     }
 
     // Run tests
-    let runner = TestRunner::new(config.clone(), args.config.clone(), docker.clone(), run_ctx);
+    let runner = TestRunner::new(
+        config.clone(),
+        args.config.clone(),
+        docker.clone(),
+        run_ctx,
+        args.no_docker,
+    );
     let results = runner.run().await?;
 
     // Print and export results

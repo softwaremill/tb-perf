@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use std::future::Future;
+use std::process::Stdio;
 use tb::error::{CreateAccountErrorKind, CreateAccountsError};
 use tigerbeetle_unofficial as tb;
+use tokio::process::Command;
 use tracing::{error, info, warn};
 
 /// TigerBeetle maximum batch size per API operation.
@@ -230,6 +232,50 @@ pub async fn wait_for_ready(cluster_addresses: &[String], timeout_secs: u64) -> 
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+}
+
+/// Reset a local TigerBeetle instance (for --no-docker mode)
+///
+/// Calls the tigerbeetle-local.sh script to wipe and restart TigerBeetle.
+/// This is used between test runs when running TigerBeetle locally (e.g., on macOS).
+pub async fn reset_local() -> Result<()> {
+    info!("Resetting local TigerBeetle instance...");
+
+    // Find the script relative to the current directory
+    let script_path = "scripts/tigerbeetle-local.sh";
+
+    // Wipe existing data
+    info!("Wiping TigerBeetle data...");
+    let output = Command::new(script_path)
+        .arg("wipe")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to execute tigerbeetle-local.sh wipe")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("tigerbeetle-local.sh wipe failed: {}", stderr);
+    }
+
+    // Start TigerBeetle again
+    info!("Starting TigerBeetle...");
+    let output = Command::new(script_path)
+        .arg("start")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("Failed to execute tigerbeetle-local.sh start")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("tigerbeetle-local.sh start failed: {}", stderr);
+    }
+
+    info!("Local TigerBeetle instance reset complete");
+    Ok(())
 }
 
 #[cfg(test)]
