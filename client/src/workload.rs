@@ -6,7 +6,7 @@ use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand_distr::{Distribution, Zipf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -272,6 +272,7 @@ impl<E: TransferExecutor> WorkloadRunner<E> {
         );
 
         let phase_ctrl = PhaseController::new(self.warmup_duration, self.test_duration);
+        let active_workers = Arc::new(AtomicI64::new(0));
 
         // Spawn workers
         let mut handles = Vec::new();
@@ -283,6 +284,7 @@ impl<E: TransferExecutor> WorkloadRunner<E> {
             let stop = phase_ctrl.stop_flag();
             let phase = phase_ctrl.phase_flag();
             let count = phase_ctrl.completed_count();
+            let active = active_workers.clone();
 
             handles.push(tokio::spawn(async move {
                 max_throughput_worker(
@@ -294,6 +296,7 @@ impl<E: TransferExecutor> WorkloadRunner<E> {
                     stop,
                     phase,
                     count,
+                    active,
                 )
                 .await
             }));
@@ -453,9 +456,14 @@ async fn max_throughput_worker<E: TransferExecutor>(
     stop: Arc<AtomicBool>,
     phase: Arc<AtomicBool>,
     completed_count: Arc<AtomicU64>,
+    active_workers: Arc<AtomicI64>,
 ) {
     let mut rng = SmallRng::from_rng(&mut rand::rng());
-    debug!("Worker {} started", worker_id);
+
+    // Track worker start
+    let count = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
+    metrics.record_active_workers(count);
+    debug!("Worker {} started (active: {})", worker_id, count);
 
     while !stop.load(Ordering::Relaxed) {
         let (source, dest) = account_selector.select_transfer_accounts(&mut rng);
@@ -477,7 +485,10 @@ async fn max_throughput_worker<E: TransferExecutor>(
         );
     }
 
-    debug!("Worker {} stopped", worker_id);
+    // Track worker stop
+    let count = active_workers.fetch_sub(1, Ordering::Relaxed) - 1;
+    metrics.record_active_workers(count);
+    debug!("Worker {} stopped (active: {})", worker_id, count);
 }
 
 #[cfg(test)]

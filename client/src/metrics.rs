@@ -1,6 +1,6 @@
 use anyhow::Result;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Histogram, MeterProvider};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, MeterProvider};
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
@@ -20,6 +20,8 @@ pub struct WorkloadMetrics {
     pub dropped: Counter<u64>,
     /// Histogram for transfer latency in microseconds
     pub latency_us: Histogram<u64>,
+    /// Gauge for active workers (max_throughput mode)
+    pub active_workers: Gauge<i64>,
     /// The meter provider (kept alive for shutdown). None for test/noop metrics.
     _provider: Option<Arc<SdkMeterProvider>>,
 }
@@ -77,12 +79,18 @@ impl WorkloadMetrics {
             .with_description("Transfer latency in microseconds")
             .build();
 
+        let active_workers = meter
+            .i64_gauge("active_workers")
+            .with_description("Number of active max_throughput workers")
+            .build();
+
         Ok(Self {
             completed,
             rejected,
             failed,
             dropped,
             latency_us,
+            active_workers,
             _provider: Some(Arc::new(provider)),
         })
     }
@@ -113,6 +121,11 @@ impl WorkloadMetrics {
         self.dropped.add(1, attrs);
     }
 
+    /// Record the current number of active workers
+    pub fn record_active_workers(&self, count: i64) {
+        self.active_workers.record(count, &[]);
+    }
+
     /// Shutdown the OpenTelemetry provider and flush remaining metrics
     pub fn shutdown(&self) {
         if let Some(ref provider) = self._provider
@@ -138,6 +151,7 @@ impl WorkloadMetrics {
             failed: meter.u64_counter("test_failed").build(),
             dropped: meter.u64_counter("test_dropped").build(),
             latency_us: meter.u64_histogram("test_latency").build(),
+            active_workers: meter.i64_gauge("test_active_workers").build(),
             _provider: None, // Don't keep provider - avoid shutdown delays
         }
     }
