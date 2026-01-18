@@ -1,0 +1,12 @@
+  ┌─────────────────────┬──────────────────────────┬──────────┐
+  │      Executor       │     Best Parameters      │ Best TPS │
+  ├─────────────────────┼──────────────────────────┼──────────┤
+  │ TigerBeetle         │ concurrency=3,000,000    │ 407,608  │
+  ├─────────────────────┼──────────────────────────┼──────────┤
+  │ PostgreSQL Batched  │ concurrency=300          │ 10,699   │
+  ├─────────────────────┼──────────────────────────┼──────────┤
+  │ PostgreSQL Atomic   │ concurrency=128, pool=16 │ 3,603    │
+  ├─────────────────────┼──────────────────────────┼──────────┤
+  │ PostgreSQL Standard │ concurrency=8, pool=8    │ 3,672    │
+  └─────────────────────┴──────────────────────────┴──────────┘
+  TigerBeetle achieves ~40x higher throughput than PostgreSQL approaches at optimal settings.
