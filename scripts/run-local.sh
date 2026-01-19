@@ -6,6 +6,7 @@
 #
 # Modes:
 #   sanity  - Quick test (~30s) for verification
+#   quick   - Medium test (~5min) with 3 iterations
 #   normal  - Full test (~25min) for benchmarking
 #
 # Executors:
@@ -38,7 +39,7 @@ POOL_SIZE="${4:-$DEFAULT_POOL_SIZE}"
 
 if [ -z "$MODE" ] || [ -z "$EXECUTOR" ]; then
     echo "Usage: $0 <mode> <executor> [concurrency] [pool_size]" >&2
-    echo "Modes: sanity, normal" >&2
+    echo "Modes: sanity, quick, normal" >&2
     echo "Executors: postgres-standard, postgres-atomic, postgres-batched, tigerbeetle" >&2
     exit 1
 fi
@@ -48,11 +49,14 @@ case "$MODE" in
     sanity)
         CONFIG_PREFIX="config.sanity"
         ;;
+    quick)
+        CONFIG_PREFIX="config.quick"
+        ;;
     normal|full)
         CONFIG_PREFIX="config.local"
         ;;
     *)
-        echo "Error: Unknown mode '$MODE' (use: sanity, normal)" >&2
+        echo "Error: Unknown mode '$MODE' (use: sanity, quick, normal)" >&2
         exit 1
         ;;
 esac

@@ -1,0 +1,38 @@
+# Quick PostgreSQL max_throughput test configuration
+# 30s warmup, 60s measurement, 3 iterations
+
+[workload]
+test_mode = "max_throughput"
+concurrency = 10
+num_accounts = 100000
+zipfian_exponent = 1.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 30
+test_duration_secs = 60
+
+[database]
+type = "postgresql"
+
+[postgresql]
+isolation_level = "read_committed"
+connection_pool_size = 20
+connection_pool_min_idle = 20
+
+[deployment]
+type = "local"
+num_db_nodes = 1
+measure_network_latency = false
+
+[coordinator]
+test_runs = 3
+max_variance_threshold = 0.10
+max_error_rate = 0.05
+metrics_export_path = "./results"
+keep_grafana_running = false
+
+[monitoring]
+grafana_port = 3000
+prometheus_port = 9090
+otel_collector_port = 4317

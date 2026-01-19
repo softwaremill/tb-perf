@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Read the CSV data
-df = pd.read_csv('2026-01-18-tigerbeetle.csv')
+df = pd.read_csv('2026-01-18-tigerbeetle-quick.csv')
 
 # Sort by concurrency for better visualization
 df = df.sort_values('concurrency')
@@ -14,7 +14,7 @@ plt.plot(df['concurrency'], df['tps'], marker='o', linewidth=2, markersize=8)
 plt.xscale('log')
 plt.xlabel('Concurrency', fontsize=12)
 plt.ylabel('TPS (Transactions Per Second)', fontsize=12)
-plt.title('TigerBeetle Performance: Concurrency vs TPS', fontsize=14, fontweight='bold')
+plt.title('TigerBeetle Performance: Concurrency vs TPS (Quick Tests)', fontsize=14, fontweight='bold')
 plt.grid(True, alpha=0.3)
 
 # Mark the optimal point
@@ -25,8 +25,8 @@ plt.plot(max_concurrency, max_tps, 'r*', markersize=20, label=f'Optimal: {int(ma
 
 plt.legend(fontsize=11)
 plt.tight_layout()
-plt.savefig('concurrency_vs_tps.png', dpi=300, bbox_inches='tight')
-print(f"Graph saved to concurrency_vs_tps.png")
+plt.savefig('2026-01-18-tigerbeetle-quick.png', dpi=300, bbox_inches='tight')
+print(f"Graph saved to 2026-01-18-tigerbeetle-quick.png")
 print(f"\nOptimal configuration:")
 print(f"  Concurrency: {int(max_concurrency)}")
 print(f"  TPS: {max_tps:.1f}")

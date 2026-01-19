@@ -1,0 +1,16 @@
+concurrency,tps,error_rate,results_dir
+1,67.13333333333334,0,/Users/adamw/projects/tb-perf/results/run_20260118_205815
+4,137.98333333333332,0,/Users/adamw/projects/tb-perf/results/run_20260118_210512
+16,510.15,0,/Users/adamw/projects/tb-perf/results/run_20260118_211206
+64,1988.4,0,/Users/adamw/projects/tb-perf/results/run_20260118_211902
+256,7614.616666666667,0,/Users/adamw/projects/tb-perf/results/run_20260118_212557
+512,12667.516666666666,0,/Users/adamw/projects/tb-perf/results/run_20260118_213300
+1024,20983.65,0,/Users/adamw/projects/tb-perf/results/run_20260118_213955
+2048,27199.166666666668,0,/Users/adamw/projects/tb-perf/results/run_20260118_214650
+4096,31577.083333333332,0,/Users/adamw/projects/tb-perf/results/run_20260118_215354
+8192,39111.666666666664,0,/Users/adamw/projects/tb-perf/results/run_20260118_220055
+16384,58638.6,0,/Users/adamw/projects/tb-perf/results/run_20260118_220755
+24576,59420.13333333333,0,/Users/adamw/projects/tb-perf/results/run_20260118_221501
+32768,58869.11666666667,0,/Users/adamw/projects/tb-perf/results/run_20260118_222206
+20480,58089.4,0,/Users/adamw/projects/tb-perf/results/run_20260118_222912
+28672,55005.7,0,/Users/adamw/projects/tb-perf/results/run_20260118_223617
