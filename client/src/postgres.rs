@@ -248,6 +248,11 @@ async fn execute_atomic_transfer(
             anyhow::bail!("No result from transfer_atomic function")
         }
         Err(e) => {
+            // When transfer_atomic raises an exception, the transaction is aborted
+            // but not rolled back. We must explicitly ROLLBACK to clean up the
+            // connection state before returning it to the pool.
+            let _ = client.simple_query("ROLLBACK").await;
+
             // Check for custom SQLSTATE codes from transfer_atomic exceptions
             if let Some(db_err) = e.as_db_error() {
                 let code = db_err.code().code();

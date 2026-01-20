@@ -2,4 +2,4 @@ executor,pool_size,concurrency,tps,error_rate,results_dir,notes
 tigerbeetle,16,24576,42542.71666666667,0,/Users/adamw/projects/tb-perf/results/run_20260119_153717,
 postgres_batched,16,384,15218.89,0,/Users/adamw/projects/tb-perf/results/run_20260119_160107,
 postgres_standard,16,64,6402.266666666666,0,/Users/adamw/projects/tb-perf/results/run_20260119_164855,
-postgres_atomic,16,4,0.0,100,/Users/adamw/projects/tb-perf/results/run_20260119_162411,Failed: transaction abort bug in atomic executor
+postgres_atomic,16,64,5577.133333333333,0,/Users/adamw/projects/tb-perf/results/run_20260120_062637,
