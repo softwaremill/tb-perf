@@ -77,6 +77,41 @@ impl WorkloadMetrics {
         let latency_us = meter
             .u64_histogram("transfer_latency_us")
             .with_description("Transfer latency in microseconds")
+            .with_boundaries(vec![
+                // Sub-millisecond (for fast PostgreSQL operations)
+                100.0,
+                250.0,
+                500.0,
+                750.0,
+                // 1-10ms
+                1_000.0,
+                2_000.0,
+                3_000.0,
+                5_000.0,
+                7_500.0,
+                10_000.0,
+                // 10-100ms
+                15_000.0,
+                20_000.0,
+                30_000.0,
+                50_000.0,
+                75_000.0,
+                100_000.0,
+                // 100ms-1s (for TigerBeetle batched operations with queuing)
+                150_000.0,
+                200_000.0,
+                300_000.0,
+                400_000.0,
+                500_000.0,
+                600_000.0,
+                750_000.0,
+                1_000_000.0,
+                // 1-5s (for high queuing delays under load)
+                1_500_000.0,
+                2_000_000.0,
+                3_000_000.0,
+                5_000_000.0,
+            ])
             .build();
 
         let active_workers = meter

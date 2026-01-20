@@ -173,7 +173,7 @@ impl PrometheusClient {
             .as_secs_f64();
 
         // Range covers from measurement start to now, plus 5s buffer for scrape timing.
-        // This is always >= measurement duration since we're called after the client finishes.
+        // This automatically accounts for the 15s wait period and any other delays.
         let range_secs = query_time - measurement_start + 5.0;
         let range = format!("{}s", range_secs.round() as u64);
 
