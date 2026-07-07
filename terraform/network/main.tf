@@ -139,6 +139,22 @@ resource "google_compute_firewall" "allow_operator_to_monitoring" {
   target_tags   = ["tb-perf-monitoring"]
 }
 
+# Operator (you) can also reach the DB cluster directly, so the coordinator
+# (running on your laptop) can initialize accounts / reset data between runs
+# without relaying through a remote node.
+resource "google_compute_firewall" "allow_operator_to_db" {
+  name    = "tb-perf-allow-operator-db"
+  network = google_compute_network.tb_perf.id
+
+  allow {
+    protocol = "tcp"
+    ports    = ["5432", "3000"] # PostgreSQL, TigerBeetle
+  }
+
+  source_ranges = [var.operator_ip]
+  target_tags   = ["tb-perf-db"]
+}
+
 # SSH access for all tb-perf instances is only permitted via IAP tunneling
 # (gcloud compute ssh --tunnel-through-iap), never from the open internet.
 # 35.235.240.0/20 is Google's fixed IAP forwarding range.

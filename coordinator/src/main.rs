@@ -7,8 +7,10 @@ use tracing::{info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+mod client_deploy;
 mod docker;
 mod gcp;
+mod gcp_postgres_setup;
 mod gcp_setup;
 mod postgres_setup;
 mod prometheus;
@@ -234,16 +236,57 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         }
     }
 
+    // 3. Discover already-provisioned client nodes and build the client
+    //    binary on each (terraform/client-cluster must have been applied
+    //    beforehand, same as the DB cluster).
+    let client_nodes = client_deploy::discover_client_nodes(&remote).await?;
+    info!("Discovered {} client node(s)", client_nodes.len());
+
+    if let Some(expected) = config.deployment.num_client_nodes
+        && client_nodes.len() != expected
+    {
+        warn!(
+            "Discovered {} client nodes but config.deployment.num_client_nodes = {} - continuing with what was found",
+            client_nodes.len(),
+            expected
+        );
+    }
+
+    client_deploy::build_client_binary(&remote, &client_nodes).await?;
+
+    // 4. Initialize accounts against the remote cluster (over its external
+    //    IP - the coordinator runs outside the VPC, see terraform/network's
+    //    `allow_operator_to_db` firewall rule).
+    let num_accounts = config.workload.num_accounts;
+    let initial_balance = config.workload.initial_balance;
+
+    match config.database.kind {
+        DatabaseType::PostgreSQL => {
+            let primary = db_nodes
+                .first()
+                .context("No PostgreSQL primary discovered")?;
+            let pg_client = gcp_postgres_setup::wait_for_ready(&primary.external_ip, 60).await?;
+            gcp_postgres_setup::init_schema(&pg_client).await?;
+            gcp_postgres_setup::reset_database(&pg_client, num_accounts, initial_balance).await?;
+        }
+        DatabaseType::TigerBeetle => {
+            let cluster_addresses: Vec<String> = db_nodes
+                .iter()
+                .map(|n| format!("{}:3000", n.external_ip))
+                .collect();
+            tigerbeetle_setup::init_accounts(&cluster_addresses, num_accounts, initial_balance)
+                .await?;
+        }
+    }
+
     // TODO: remaining cloud orchestration (PLAN.md §3.4):
-    // 3. Deploy/build the client binary on each client node
-    // 4. Initialize accounts (reuse postgres_setup/tigerbeetle_setup logic
-    //    against the primary/cluster over its internal IP)
     // 5. Coordinate multi-client warmup/measurement execution
     // 6. Aggregate results across clients and DB-side Prometheus metrics
     // 7. Reset between runs, repeat for `coordinator.test_runs`
     // 8. Export aggregated JSON results and sync back to ./results/
     warn!(
-        "DB cluster setup complete - client deployment/execution orchestration is not yet implemented"
+        "DB cluster + client deployment + account initialization complete - \
+         multi-client workload execution orchestration is not yet implemented"
     );
 
     Ok(())

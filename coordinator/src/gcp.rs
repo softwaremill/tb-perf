@@ -176,6 +176,20 @@ impl GcpRemote {
     /// within `RUN_COMMAND_TIMEOUT` (rather than hanging forever - see
     /// `NONINTERACTIVE_SSH_FLAGS` for why this shouldn't normally happen).
     pub async fn run_command(&self, instance: &str, zone: &str, command: &str) -> Result<String> {
+        self.run_command_with_timeout(instance, zone, command, RUN_COMMAND_TIMEOUT)
+            .await
+    }
+
+    /// Same as `run_command`, but with a caller-specified timeout - useful
+    /// for long-running commands like `cargo build --release` that can
+    /// legitimately take much longer than the default.
+    pub async fn run_command_with_timeout(
+        &self,
+        instance: &str,
+        zone: &str,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<String> {
         debug!("[{}] running: {}", instance, command);
 
         let mut args = vec![
@@ -199,14 +213,14 @@ impl GcpRemote {
             .stderr(Stdio::piped())
             .output();
 
-        let output = tokio::time::timeout(RUN_COMMAND_TIMEOUT, child)
+        let output = tokio::time::timeout(timeout, child)
             .await
             .with_context(|| {
                 format!(
                     "Command on {} timed out after {:?} - if this is the first connection to \
                      this instance, try running `gcloud compute ssh {} --zone {} \
                      --tunnel-through-iap` manually once first",
-                    instance, RUN_COMMAND_TIMEOUT, instance, zone
+                    instance, timeout, instance, zone
                 )
             })?
             .with_context(|| format!("Failed to SSH into {}", instance))?;

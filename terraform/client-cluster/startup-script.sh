@@ -45,9 +45,28 @@ if ! command -v gcloud >/dev/null 2>&1; then
 fi
 
 # --- Install Rust toolchain (used only if building the client on-instance) ---
-if [ ! -x /root/.cargo/bin/cargo ]; then
+# Installed to a shared, world-readable location rather than the default
+# $HOME/.cargo - this startup-script runs as root, but the client binary is
+# built later over SSH as the OS-Login user, not root, so a root-only
+# /root/.cargo would be inaccessible to it.
+export RUSTUP_HOME=/opt/rust/rustup
+export CARGO_HOME=/opt/rust/cargo
+
+if [ ! -x /opt/rust/cargo/bin/cargo ]; then
   echo "Installing Rust toolchain..."
+  mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+  chmod -R a+rX /opt/rust
 fi
+
+# Make cargo/rustc available on PATH for interactive login shells (SSH
+# --command invocations reference the full path directly instead, since
+# non-interactive shells don't source /etc/profile.d).
+cat >/etc/profile.d/tb-perf-cargo.sh <<'EOF'
+export RUSTUP_HOME=/opt/rust/rustup
+export CARGO_HOME=/opt/rust/cargo
+export PATH="/opt/rust/cargo/bin:$PATH"
+EOF
+chmod +r /etc/profile.d/tb-perf-cargo.sh
 
 echo "=== tb-perf client node startup complete ==="

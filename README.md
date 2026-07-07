@@ -11,7 +11,7 @@ tb-perf/
 ├── common/              # Shared configuration and types
 ├── docker/              # Docker Compose for local testing
 ├── grafana/             # Dashboard and datasource provisioning
-├── terraform/           # AWS infrastructure as code
+├── terraform/           # GCP infrastructure as code
 ├── scripts/             # Database setup and management scripts
 ├── config.*.toml        # Example configuration files
 └── PLAN.md              # Detailed implementation plan
@@ -24,7 +24,7 @@ tb-perf/
 - Rust 1.85+ (edition 2024)
 - Docker + Docker Compose (for local testing)
 - Terraform (for cloud deployments)
-- AWS credentials (for cloud deployments)
+- GCP project + credentials (for cloud deployments) - see `terraform/README.md`
 
 ## Running Tests
 
@@ -82,6 +82,53 @@ docker compose -f docker/docker-compose.tigerbeetle.yml -p tbperf up -d otel-col
 # Cleanup
 ./scripts/tigerbeetle-local.sh wipe
 ./scripts/stop-docker.sh tigerbeetle
+```
+
+## Cloud (GCP) Testing
+
+Cloud tests run TigerBeetle/PostgreSQL as a 3-node replicated cluster on GCP Compute Engine (see `PLAN.md` §3 for the full design). This is under active development - infrastructure provisioning and DB cluster bring-up are implemented and validated; client deployment, multi-client coordination, and result aggregation are not yet implemented.
+
+### Prerequisites
+
+- A GCP project with billing enabled and the Compute Engine, IAP, and Cloud Storage APIs enabled
+- `gcloud` CLI, authenticated (`gcloud auth login && gcloud auth application-default login`)
+- Terraform >= 1.5
+
+### 1. Provision infrastructure
+
+See `terraform/README.md` for full details. Summary:
+
+```bash
+./scripts/gcp-bootstrap-tfstate.sh          # one-time: creates the Terraform state bucket
+
+cd terraform/network
+cp terraform.tfvars.example terraform.tfvars  # fill in your operator_ip (curl -s ifconfig.me)
+terraform init && terraform apply
+
+cd ../database-cluster
+terraform init && terraform apply -var="database_type=tigerbeetle"  # or database_type=postgresql
+```
+
+This only provisions bare VMs with Docker/tooling installed - it does **not** start any database software.
+
+### 2. Bring up the database cluster
+
+The coordinator does this over `gcloud compute ssh --tunnel-through-iap` - no manual SSH required:
+
+```bash
+cargo build --release --bin coordinator
+./target/release/coordinator -c config.cloud-tigerbeetle-fixedrate.toml   # or config.cloud-postgresql-fixedrate.toml
+```
+
+This discovers the provisioned DB nodes (by GCP label), formats/starts a 3-node TigerBeetle cluster or bootstraps a 3-node synchronous PostgreSQL replication cluster (quorum-based, matching TigerBeetle's leader+1-of-3 write quorum), and verifies replication came up. It currently stops there - client deployment and workload execution are still TODO (see `PLAN.md` §3.4).
+
+### 3. Tear down
+
+Cloud resources bill continuously once provisioned, regardless of whether a test is actively running - tear down when done:
+
+```bash
+cd terraform/database-cluster && terraform destroy -var="database_type=tigerbeetle"  # match whichever type you applied
+cd ../network && terraform destroy
 ```
 
 ## Configuration
@@ -250,7 +297,7 @@ Phase 2 (Local Implementation) - **Complete**
 - JSON results export
 
 Phase 3 (Cloud Infrastructure) - **TODO**
-- Terraform modules for AWS deployment
+- Terraform modules for GCP deployment
 - Multi-client coordination
 - Result aggregation across clients
 

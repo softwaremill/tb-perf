@@ -13,6 +13,9 @@ pub struct DbNode {
     pub name: String,
     pub zone: String,
     pub internal_ip: String,
+    /// External IP - used for direct connections from the coordinator
+    /// (e.g. account initialization), which runs outside the VPC.
+    pub external_ip: String,
 }
 
 /// Discover the DB nodes for `database_type` (provisioned by
@@ -36,10 +39,15 @@ pub async fn discover_db_nodes(remote: &GcpRemote, database_type: &str) -> Resul
                 .internal_ip()
                 .with_context(|| format!("DB instance {} has no internal IP", i.name))?
                 .to_string();
+            let external_ip = i
+                .external_ip()
+                .with_context(|| format!("DB instance {} has no external IP", i.name))?
+                .to_string();
             Ok(DbNode {
                 name: i.name.clone(),
                 zone: i.zone_name().to_string(),
                 internal_ip,
+                external_ip,
             })
         })
         .collect()
