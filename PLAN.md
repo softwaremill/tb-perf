@@ -20,7 +20,7 @@ Build a comprehensive performance comparison framework for TigerBeetle vs Postgr
 - **TigerBeetle Client**: Official TigerBeetle Rust client
 - **PostgreSQL Client**: `tokio-postgres` (async PostgreSQL client)
 - **Containerization**: Docker + Docker Compose
-- **Cloud Infrastructure**: AWS (EC2, EBS)
+- **Cloud Infrastructure**: GCP (Compute Engine, Persistent Disk, Local SSD)
 - **Infrastructure as Code**: Terraform
 - **Metrics Collection**: OpenTelemetry (OTLP exporter)
 - **Metrics Storage**: Prometheus (as OpenTelemetry backend)
@@ -83,7 +83,7 @@ Initialize a Rust workspace with the following structure:
 - `common/` - Library crate for shared configuration parsing and types
 - Docker directory for local testing setup (docker-compose, Dockerfiles)
 - Grafana provisioning directory for dashboards and datasources
-- Terraform directory with modules for AWS infrastructure (network, database-cluster, client-cluster)
+- Terraform directory with modules for GCP infrastructure (network, database-cluster, client-cluster)
 - Scripts directory for database setup
 - Example configuration files (local.toml, cloud.toml)
 
@@ -125,9 +125,10 @@ For `test_mode = "fixed_rate"`:
 - `type` - "local" or "cloud"
 - `num_db_nodes` - Database cluster size (1 for local, 3 for cloud)
 - `num_client_nodes` - Number of client instances (cloud only)
-- `aws_region` - AWS region (cloud only)
-- `db_instance_type` - EC2 instance type for database (default: i4i.xlarge)
-- `client_instance_type` - EC2 instance type for clients (default: c5.large)
+- `gcp_project` - GCP project ID (cloud only)
+- `gcp_region` - GCP region (cloud only)
+- `db_machine_type` - GCE machine type for database (default: n2-highmem-4 + Local SSD)
+- `client_machine_type` - GCE machine type for clients (default: n2-standard-2)
 - `measure_network_latency` - Measure inter-node latency (default: true)
 
 **`[coordinator]` section** (used by coordinator):
@@ -448,25 +449,28 @@ Create detailed local testing documentation with:
 - Software version pinning (Docker images, database versions)
 - Troubleshooting common issues
 
-## Phase 3: Cloud Infrastructure (AWS)
+## Phase 3: Cloud Infrastructure (GCP)
 
 ### 3.1 Terraform Infrastructure
 
+**Provider**: GCP, project `tigerbettle-sandbox`, region `europe-central2` (Warsaw - closest region to the team), spread across zones `europe-central2-a/b/c`. All infrastructure is ephemeral (provisioned per test session, destroyed afterward), so the network design favors simplicity over defense-in-depth.
+
 **Network Module**:
-- VPC with public/private subnets across 3 AZs
-- Internet Gateway
-- NAT Gateways (for private subnets)
-- Security Groups:
-  - Database cluster: internal communication + client access
-  - Client cluster: outbound only
-  - Monitoring: Prometheus/Grafana access
+- Single VPC with one subnet per region (GCP subnets already span all zones in a region, unlike AWS's AZ-scoped subnets)
+- All instances (DB, client, monitoring) get external IPs directly; no Cloud Router / Cloud NAT is provisioned
+  - Simplifies apply/destroy and avoids NAT costs, since the environment is short-lived and access is locked down via firewall rules rather than network isolation
+- Private Google Access enabled on the subnet so instances can reach Cloud Storage without relying on their external IP
+- Firewall rules (replacing AWS Security Groups):
+  - Database cluster: allow internal replication traffic between DB nodes and transfer/query traffic from client nodes; deny all other ingress
+  - Client cluster: egress only (to DB nodes, GCS, package repositories); no inbound ports required
+  - Monitoring: allow Prometheus/Grafana ports only from the operator's IP
+  - IAP ingress rule: allow TCP/22 from Google's IAP range (`35.235.240.0/20`) to support `gcloud compute ssh --tunnel-through-iap`
 
 **Database Cluster Module**:
-- 3 EC2 instances (i4i.xlarge: 4 vCPU, 32 GB RAM, 1x 468 GB NVMe SSD)
-  - NVMe instance storage provides ~250k IOPS, ~4 GB/s throughput (vs gp3: 3k-16k IOPS)
-  - Critical for database workloads with high write throughput
-  - Data ephemeral (acceptable for benchmarking, not production)
-  - **Verify NVMe mounting**: Setup script must verify NVMe device is mounted before starting database
+- 3 Compute Engine instances (`n2-highmem-4`: 4 vCPU, 32 GB RAM), one per zone, each with 1x 375 GB Local SSD (NVMe-backed)
+  - Local SSD provides very high IOPS/throughput, comparable in spirit to AWS's i4i NVMe instance storage
+  - Data is ephemeral (lost on stop/terminate) - acceptable for benchmarking, not production
+  - **Verify Local SSD mounting**: Setup script must verify the Local SSD device is mounted before starting the database
 - For PostgreSQL: Set up synchronous 3-node cluster replication (matching TigerBeetle's consistency model)
   - Primary + 2 synchronous standbys
   - Configure `synchronous_standby_names = 'ANY 2 (*)'` for 2-of-3 quorum
@@ -474,14 +478,17 @@ Create detailed local testing documentation with:
   - Tune: shared_buffers, work_mem, fsync settings, WAL configuration, checkpoint settings
 - For TigerBeetle: 3-node cluster with synchronous replication
 - Install node-exporter for metrics
-- Automated setup scripts via user-data
+- Automated setup scripts via instance **startup-scripts** (GCP's equivalent of AWS user-data)
 - **Version pinning**: Pin PostgreSQL version, TigerBeetle version, and all Docker image tags
+- A dedicated service account attached to each instance, scoped only to Cloud Storage access (client binary pull, results/log push) - no broader project permissions
 
 **Client Cluster Module**:
-- Configurable number of EC2 instances via `num_client_nodes` variable (c5.large: 2 vCPU, 4 GB RAM) - compute-optimized
-- Docker pre-installed
-- Rust toolchain pre-installed
-- Client binary deployment via S3 or built on instance
+- Configurable number of Compute Engine instances via `num_client_nodes` variable (`n2-standard-2`: 2 vCPU, 8 GB RAM) - general-purpose, sized for load generation rather than heavy compute
+- Docker pre-installed via startup-script
+- Rust toolchain pre-installed via startup-script (if building the client on-instance)
+- Client binary deployment via a Cloud Storage (GCS) bucket, or built on instance from source
+
+**Remote command execution**: instead of AWS SSM Run Command, orchestration uses `gcloud compute ssh --tunnel-through-iap` (Identity-Aware Proxy). This avoids manual SSH key management (GCP OS Login auto-provisions ephemeral SSH keys tied to IAM identity) and does not require opening SSH to the public internet - access is gated by IAM (`roles/iap.tunnelResourceAccessor`) plus the narrow IAP-range firewall rule. This preserves the "fully automated from laptop, no key management" goal from the original AWS/SSM design.
 
 ### 3.2 Database Cluster Setup
 
@@ -523,12 +530,12 @@ Cloud tests run fully automatically from laptop with zero manual intervention du
 **Orchestration Flow**:
 
 1. **Infrastructure Provisioning** (from laptop):
-   - Run `terraform apply` to provision all AWS resources
+   - Run `terraform apply` to provision all GCP resources (state stored in a GCS bucket, which natively supports locking - no separate lock table needed)
    - Wait for all instances to be ready
    - Automated health checks for all services
 
 2. **Pre-Test Setup**:
-   - **NVMe verification**: Verify i4i instance storage is mounted on all DB nodes
+   - **Local SSD verification**: Verify Local SSD storage is mounted on all DB nodes
    - **Version verification**: Verify PostgreSQL/TigerBeetle versions match pinned versions
    - **Network latency measurement**: Automatically measure RTT between all DB node pairs
    - Export network metrics to `results/{config_name}/network_latency.json`
@@ -677,10 +684,10 @@ Consider adding these test scenarios:
 ### 4.3 Cloud Testing Documentation
 
 Create detailed cloud testing documentation with:
-- Prerequisites (Terraform, AWS credentials, SSH keys)
+- Prerequisites (Terraform, GCP project/credentials via `gcloud auth application-default login`, IAP tunnel access)
 - How to provision infrastructure
 - Software version pinning strategy (PostgreSQL, TigerBeetle, Docker images)
-- NVMe instance storage verification on i4i instances
+- Local SSD storage verification on GCE database instances
 - Network latency measurement procedures
 - How to run tests from laptop remotely
 - Understanding test modes (max_throughput vs fixed_rate)
@@ -692,5 +699,5 @@ Create detailed cloud testing documentation with:
 - Error classification: business rejections vs database errors
 - How to fully teardown infrastructure
 - Troubleshooting common issues (high variance, client saturation, network issues)
-- AWS cost estimation
+- GCP cost estimation
 
