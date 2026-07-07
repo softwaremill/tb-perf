@@ -22,9 +22,10 @@ cluster_addresses = ["tb-node-1:3000", "tb-node-2:3000", "tb-node-3:3000"]
 type = "cloud"
 num_db_nodes = 3
 num_client_nodes = 5
-aws_region = "us-east-1"
-db_instance_type = "i4i.xlarge"
-client_instance_type = "c5.large"
+gcp_project = "tigerbettle-sandbox"
+gcp_region = "europe-central2"
+db_machine_type = "n2-highmem-4"
+client_machine_type = "n2-standard-2"
 measure_network_latency = true
 
 [coordinator]
