@@ -134,7 +134,6 @@ impl IsolationLevel {
     }
 }
 
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TigerBeetleConfig {
     pub cluster_addresses: Vec<String>,
@@ -148,11 +147,13 @@ pub struct DeploymentConfig {
     #[serde(default)]
     pub num_client_nodes: Option<usize>,
     #[serde(default)]
-    pub aws_region: Option<String>,
+    pub gcp_project: Option<String>,
     #[serde(default)]
-    pub db_instance_type: Option<String>,
+    pub gcp_region: Option<String>,
     #[serde(default)]
-    pub client_instance_type: Option<String>,
+    pub db_machine_type: Option<String>,
+    #[serde(default)]
+    pub client_machine_type: Option<String>,
     pub measure_network_latency: bool,
 }
 
@@ -231,8 +232,11 @@ impl Config {
             if self.deployment.num_client_nodes.is_none() {
                 anyhow::bail!("Cloud deployment requires num_client_nodes to be specified");
             }
-            if self.deployment.aws_region.is_none() {
-                anyhow::bail!("Cloud deployment requires aws_region to be specified");
+            if self.deployment.gcp_project.is_none() {
+                anyhow::bail!("Cloud deployment requires gcp_project to be specified");
+            }
+            if self.deployment.gcp_region.is_none() {
+                anyhow::bail!("Cloud deployment requires gcp_region to be specified");
             }
         }
 
@@ -315,9 +319,10 @@ mod tests {
                 kind: DeploymentType::Local,
                 num_db_nodes: 1,
                 num_client_nodes: None,
-                aws_region: None,
-                db_instance_type: None,
-                client_instance_type: None,
+                gcp_project: None,
+                gcp_region: None,
+                db_machine_type: None,
+                client_machine_type: None,
                 measure_network_latency: false,
             },
             coordinator: CoordinatorConfig {
@@ -448,7 +453,8 @@ mod tests {
         let mut config = test_config();
         config.deployment.kind = DeploymentType::Cloud;
         config.deployment.num_client_nodes = Some(2);
-        config.deployment.aws_region = None;
+        config.deployment.gcp_project = Some("tigerbettle-sandbox".to_string());
+        config.deployment.gcp_region = None;
         assert!(config.validate().is_err());
     }
 
@@ -457,7 +463,18 @@ mod tests {
         let mut config = test_config();
         config.deployment.kind = DeploymentType::Cloud;
         config.deployment.num_client_nodes = None;
-        config.deployment.aws_region = Some("us-east-1".to_string());
+        config.deployment.gcp_project = Some("tigerbettle-sandbox".to_string());
+        config.deployment.gcp_region = Some("europe-central2".to_string());
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_cloud_deployment_requires_project() {
+        let mut config = test_config();
+        config.deployment.kind = DeploymentType::Cloud;
+        config.deployment.num_client_nodes = Some(2);
+        config.deployment.gcp_project = None;
+        config.deployment.gcp_region = Some("europe-central2".to_string());
         assert!(config.validate().is_err());
     }
 

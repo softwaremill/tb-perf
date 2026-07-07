@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::time::Duration;
 use tb_perf_common::Config;
@@ -8,6 +8,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 mod docker;
+mod gcp;
+mod gcp_setup;
 mod postgres_setup;
 mod prometheus;
 mod results;
@@ -114,7 +116,10 @@ async fn run_local_tests(config: &Config, args: &Args, run_ctx: &RunContext) -> 
         if let Err(e) = docker.save_logs_to_file(&run_ctx.docker_log_path).await {
             warn!("Failed to save docker logs: {:?}", e);
         } else {
-            info!("Docker logs saved to: {}", run_ctx.docker_log_path.display());
+            info!(
+                "Docker logs saved to: {}",
+                run_ctx.docker_log_path.display()
+            );
         }
     }
 
@@ -186,17 +191,59 @@ async fn run_local_tests_inner(
 
 async fn run_cloud_tests(config: &Config) -> Result<()> {
     info!("Running cloud tests");
-    info!("  Region: {:?}", config.deployment.aws_region);
+    info!("  Project: {:?}", config.deployment.gcp_project);
+    info!("  Region: {:?}", config.deployment.gcp_region);
     info!("  DB nodes: {}", config.deployment.num_db_nodes);
     info!("  Client nodes: {:?}", config.deployment.num_client_nodes);
 
-    // TODO: Implement cloud test orchestration
-    // 1. Verify infrastructure is provisioned
-    // 2. Deploy client binaries
-    // 3. Initialize database cluster
-    // 4. Coordinate multi-client test execution
-    // 5. Aggregate results from all clients
-    // 6. Download results to laptop
+    let project = config
+        .deployment
+        .gcp_project
+        .as_ref()
+        .context("Cloud deployment requires deployment.gcp_project")?;
+    let remote = gcp::GcpRemote::new(project);
+
+    // 1. Discover already-provisioned DB nodes (terraform/database-cluster
+    //    must have been applied beforehand - this coordinator does not run
+    //    `terraform apply` itself, see PLAN.md §3.1/§3.4).
+    let db_type_str = format!("{:?}", config.database.kind).to_lowercase();
+    let db_nodes = gcp_setup::discover_db_nodes(&remote, &db_type_str).await?;
+    info!(
+        "Discovered {} DB node(s) for database_type={}",
+        db_nodes.len(),
+        db_type_str
+    );
+
+    if db_nodes.len() != config.deployment.num_db_nodes {
+        warn!(
+            "Discovered {} DB nodes but config.deployment.num_db_nodes = {} - continuing with what was found",
+            db_nodes.len(),
+            config.deployment.num_db_nodes
+        );
+    }
+
+    // 2. Bring up the DB cluster (one-time per test session - wipes any
+    //    existing data on those nodes).
+    match config.database.kind {
+        DatabaseType::PostgreSQL => {
+            gcp_setup::setup_postgresql_cluster(&remote, &db_nodes).await?;
+        }
+        DatabaseType::TigerBeetle => {
+            gcp_setup::setup_tigerbeetle_cluster(&remote, &db_nodes).await?;
+        }
+    }
+
+    // TODO: remaining cloud orchestration (PLAN.md §3.4):
+    // 3. Deploy/build the client binary on each client node
+    // 4. Initialize accounts (reuse postgres_setup/tigerbeetle_setup logic
+    //    against the primary/cluster over its internal IP)
+    // 5. Coordinate multi-client warmup/measurement execution
+    // 6. Aggregate results across clients and DB-side Prometheus metrics
+    // 7. Reset between runs, repeat for `coordinator.test_runs`
+    // 8. Export aggregated JSON results and sync back to ./results/
+    warn!(
+        "DB cluster setup complete - client deployment/execution orchestration is not yet implemented"
+    );
 
     warn!("Cloud test orchestration not yet implemented");
 

@@ -284,9 +284,10 @@ mod tests {
                 kind: DeploymentType::Local,
                 num_db_nodes: 1,
                 num_client_nodes: None,
-                aws_region: None,
-                db_instance_type: None,
-                client_instance_type: None,
+                gcp_project: None,
+                gcp_region: None,
+                db_machine_type: None,
+                client_machine_type: None,
                 measure_network_latency: false,
             },
             coordinator: CoordinatorConfig {

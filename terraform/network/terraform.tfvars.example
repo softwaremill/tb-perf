@@ -1,0 +1,5 @@
+# Copy this file to terraform.tfvars and fill in your own values.
+# terraform.tfvars is gitignored - it's specific to your machine/location.
+
+# Find your current public IP with: curl -s ifconfig.me
+operator_ip = "203.0.113.4/32"
