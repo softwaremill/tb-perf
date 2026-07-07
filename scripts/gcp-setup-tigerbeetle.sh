@@ -39,7 +39,13 @@ docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 if [ ! -f "$DATA_FILE" ]; then
   echo "Formatting data file..."
+  # --security-opt seccomp=unconfined: Docker's default seccomp profile
+  # blocks the io_uring_setup/io_uring_enter/io_uring_register syscalls
+  # TigerBeetle requires, independent of (and checked before) the host
+  # kernel's io_uring_disabled sysctl. Acceptable tradeoff on a dedicated,
+  # ephemeral benchmark VM (see PLAN.md §3.1 - not a shared/production host).
   docker run --rm \
+    --security-opt seccomp=unconfined \
     -v "$DATA_DIR:/data" \
     "$IMAGE" \
     format --cluster=0 --replica="$REPLICA_INDEX" --replica-count="$REPLICA_COUNT" \
@@ -53,6 +59,7 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --network host \
   --restart unless-stopped \
+  --security-opt seccomp=unconfined \
   -v "$DATA_DIR:/data" \
   "$IMAGE" \
   start --addresses="$ADDRESSES" "/data/${REPLICA_INDEX}_0.tigerbeetle"

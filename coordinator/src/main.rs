@@ -245,7 +245,5 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         "DB cluster setup complete - client deployment/execution orchestration is not yet implemented"
     );
 
-    warn!("Cloud test orchestration not yet implemented");
-
     Ok(())
 }
