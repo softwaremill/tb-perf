@@ -117,9 +117,14 @@ pub async fn build_client_binary(remote: &GcpRemote, nodes: &[ClientNode]) -> Re
         // $HOME/.cargo or shell profile sourcing: it's installed to a
         // shared /opt/rust location (see terraform/client-cluster's
         // startup-script), and non-interactive SSH --command invocations
-        // don't source /etc/profile.d anyway.
+        // don't source /etc/profile.d anyway. RUSTUP_HOME/CARGO_HOME must
+        // also be exported explicitly: cargo is actually a rustup shim that
+        // looks up these env vars to find its settings/default toolchain -
+        // without them it falls back to (nonexistent) $HOME/.rustup and
+        // fails with "no default toolchain configured".
         let build_command = format!(
-            "cd {dir} && /opt/rust/cargo/bin/cargo build --release --bin client",
+            "export RUSTUP_HOME=/opt/rust/rustup CARGO_HOME=/opt/rust/cargo && \
+             cd {dir} && /opt/rust/cargo/bin/cargo build --release --bin client",
             dir = REMOTE_SRC_DIR,
         );
         remote
