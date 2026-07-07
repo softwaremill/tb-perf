@@ -2,6 +2,12 @@ services:
   tigerbeetle:
     image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
     container_name: tb-perf-tigerbeetle
+    # Docker's default seccomp profile blocks the io_uring syscalls
+    # TigerBeetle requires, independent of the host kernel's io_uring
+    # support/sysctl settings. See scripts/gcp-setup-tigerbeetle.sh for the
+    # same fix applied to the GCP cloud deployment.
+    security_opt:
+      - seccomp:unconfined
     ports:
       - "3000:3000"
     volumes:
@@ -34,9 +40,9 @@ services:
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
     ports:
-      - "4317:4317"   # OTLP gRPC receiver
-      - "4318:4318"   # OTLP HTTP receiver
-      - "8889:8889"   # Prometheus metrics exporter
+      - "4317:4317" # OTLP gRPC receiver
+      - "4318:4318" # OTLP HTTP receiver
+      - "8889:8889" # Prometheus metrics exporter
     depends_on:
       - prometheus
 
@@ -62,7 +68,7 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
     ports:
-      - "3001:3000"  # Different port to avoid conflict with TigerBeetle
+      - "3001:3000" # Different port to avoid conflict with TigerBeetle
     volumes:
       - grafana_data:/var/lib/grafana
       - ../grafana/provisioning:/etc/grafana/provisioning:ro

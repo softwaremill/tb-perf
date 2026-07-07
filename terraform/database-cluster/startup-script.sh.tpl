@@ -38,6 +38,15 @@ else
   echo "WARNING: Local SSD device not found at $DEVICE - falling back to boot disk for data"
 fi
 
+# --- Enable io_uring (required by TigerBeetle; disabled by default via
+# sysctl on recent Ubuntu kernels as a security mitigation). Scoped to
+# TigerBeetle nodes only since PostgreSQL 16 doesn't use io_uring. ---
+if [ "${database_type}" = "tigerbeetle" ]; then
+  echo "Enabling io_uring for TigerBeetle..."
+  echo 'kernel.io_uring_disabled=0' > /etc/sysctl.d/99-tigerbeetle-io-uring.conf
+  sysctl -w kernel.io_uring_disabled=0
+fi
+
 # --- Install Docker ---
 if ! command -v docker >/dev/null 2>&1; then
   echo "Installing Docker..."
