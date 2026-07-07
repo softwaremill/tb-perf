@@ -25,7 +25,7 @@
 
 set -euo pipefail
 
-ROLE="${1:?Usage: gcp-setup-postgresql.sh {primary|standby} ...}"
+ROLE="${1:?Usage: gcp-setup-postgresql.sh primary-or-standby ...}"
 
 DATA_DIR="/mnt/tb-perf-data/postgresql"
 IMAGE="postgres:16" # keep in sync with docker/docker-compose.postgresql.yml
@@ -45,6 +45,12 @@ case "$ROLE" in
     rm -rf "${DATA_DIR:?}"
     mkdir -p "$DATA_DIR"
 
+    # NOTE: synchronous_standby_names is intentionally NOT set here. If it
+    # were, every write - including Docker's own automatic `CREATE DATABASE
+    # tbperf` during first-time container init - would block forever
+    # waiting for a synchronous standby ack, since no standby exists yet at
+    # this point. It gets enabled later, once standbys are actually up (see
+    # coordinator/src/gcp_setup.rs's post-standby-setup "activate" step).
     docker run -d \
       --name "$CONTAINER_NAME" \
       --network host \
@@ -62,8 +68,7 @@ case "$ROLE" in
         -c max_wal_senders=10 \
         -c max_replication_slots=10 \
         -c hot_standby=on \
-        -c synchronous_commit=on \
-        -c "synchronous_standby_names=ANY 1 ($STANDBY1_NAME, $STANDBY2_NAME)"
+        -c synchronous_commit=on
 
     echo "Waiting for primary to accept connections..."
     for _ in $(seq 1 30); do
@@ -116,13 +121,24 @@ case "$ROLE" in
         -d "host=$PRIMARY_IP port=5432 user=$REPL_USER application_name=$STANDBY_NAME" \
         -D /var/lib/postgresql/data -Fp -Xs -P -R
 
+    # A standby's max_connections/max_wal_senders/max_replication_slots
+    # must be >= the primary's values (these size shared-memory structures
+    # needed for recovery) - a lower value here makes the standby refuse to
+    # start at all ("FATAL: recovery aborted because of insufficient
+    # parameter settings"). Keep these in sync with the primary's settings
+    # above.
     docker run -d \
       --name "$CONTAINER_NAME" \
       --network host \
       --restart unless-stopped \
       -v "$DATA_DIR:/var/lib/postgresql/data" \
       "$IMAGE" \
-      postgres -c listen_addresses='*' -c hot_standby=on
+      postgres \
+        -c listen_addresses='*' \
+        -c hot_standby=on \
+        -c max_connections=200 \
+        -c max_wal_senders=10 \
+        -c max_replication_slots=10
 
     echo "Waiting for standby to accept read-only connections..."
     for _ in $(seq 1 30); do
