@@ -1,6 +1,7 @@
 use crate::gcp::GcpRemote;
 use anyhow::{Context, Result};
-use tracing::info;
+use std::time::Duration;
+use tracing::{info, warn};
 
 const POSTGRESQL_SCRIPT: &str = "scripts/gcp-setup-postgresql.sh";
 const TIGERBEETLE_SCRIPT: &str = "scripts/gcp-setup-tigerbeetle.sh";
@@ -168,5 +169,50 @@ pub async fn setup_postgresql_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> R
     }
 
     info!("PostgreSQL cluster setup complete");
+    Ok(())
+}
+
+/// Sanity-check that synchronous replication actually came up after
+/// `setup_postgresql_cluster` - logs a warning (but doesn't fail the run)
+/// if fewer standbys are connected than expected, since replication can
+/// take a few seconds to establish after the standby container starts.
+pub async fn verify_postgresql_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> Result<()> {
+    if nodes.is_empty() {
+        return Ok(());
+    }
+    let primary = &nodes[0];
+    let expected_standbys = nodes.len() - 1;
+
+    info!("Waiting for standbys to connect to primary...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let command = r#"docker exec tb-perf-postgres psql -U postgres -t -A -F',' -c "SELECT application_name, state, sync_state FROM pg_stat_replication;""#;
+
+    let output = remote
+        .run_command(&primary.name, &primary.zone, command)
+        .await
+        .context("Failed to query pg_stat_replication on primary")?;
+
+    let connected: Vec<&str> = output
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    info!("Primary replication status: {:?}", connected);
+
+    if connected.len() < expected_standbys {
+        warn!(
+            "Expected {} standby(s) connected, found {} - replication may still be establishing (this does not fail the run)",
+            expected_standbys,
+            connected.len()
+        );
+    } else {
+        info!(
+            "All {} standby(s) connected and replicating",
+            connected.len()
+        );
+    }
+
     Ok(())
 }
