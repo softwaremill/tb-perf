@@ -227,6 +227,7 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
     match config.database.kind {
         DatabaseType::PostgreSQL => {
             gcp_setup::setup_postgresql_cluster(&remote, &db_nodes).await?;
+            gcp_setup::verify_postgresql_cluster(&remote, &db_nodes).await?;
         }
         DatabaseType::TigerBeetle => {
             gcp_setup::setup_tigerbeetle_cluster(&remote, &db_nodes).await?;
