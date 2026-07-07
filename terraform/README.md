@@ -48,6 +48,16 @@ terraform init
 terraform apply
 ```
 
+Steps 1-4 above only provision bare VMs with Docker/tooling installed via startup-script - **no database software is started yet**. That happens separately, driven by the coordinator over `gcloud compute ssh --tunnel-through-iap` (see the root `README.md`'s "Cloud (GCP) Testing" section):
+
+```bash
+cd ../..   # back to the tb-perf root
+cargo build --release --bin coordinator
+./target/release/coordinator -c config.cloud-tigerbeetle-fixedrate.toml   # or config.cloud-postgresql-fixedrate.toml
+```
+
+This discovers the DB nodes provisioned above (by GCP label) and formats/starts the TigerBeetle cluster or bootstraps PostgreSQL synchronous replication, per `coordinator/src/gcp_setup.rs`. Client deployment and workload execution are not yet implemented (see `PLAN.md` §3.4).
+
 To tear everything down (recommended after each test session, to control cost):
 
 ```bash
