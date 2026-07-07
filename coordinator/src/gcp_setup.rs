@@ -168,6 +168,27 @@ pub async fn setup_postgresql_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> R
             .with_context(|| format!("Failed to set up PostgreSQL standby on {}", standby.name))?;
     }
 
+    // Only now that standbys actually exist do we require synchronous
+    // acknowledgment from one of them - enabling this any earlier (e.g. at
+    // initial primary startup) deadlocks every write, including Docker's
+    // own automatic `CREATE DATABASE` during first-time container init,
+    // since there's nothing yet to satisfy the synchronous requirement.
+    info!("Activating synchronous replication on primary...");
+    // Two separate -c flags, NOT one -c with two ;-separated statements:
+    // psql sends a single multi-statement -c string as one combined query,
+    // which Postgres implicitly wraps in a transaction block - and ALTER
+    // SYSTEM is explicitly disallowed inside a transaction block.
+    let activate_command = format!(
+        "sudo docker exec {container} psql -U postgres -c \"ALTER SYSTEM SET synchronous_standby_names = 'ANY 1 ({s1}, {s2})';\" -c \"SELECT pg_reload_conf();\"",
+        container = "tb-perf-postgres",
+        s1 = standby_names[0],
+        s2 = standby_names[1],
+    );
+    remote
+        .run_command(&primary.name, &primary.zone, &activate_command)
+        .await
+        .context("Failed to activate synchronous replication on primary")?;
+
     info!("PostgreSQL cluster setup complete");
     Ok(())
 }
@@ -186,7 +207,7 @@ pub async fn verify_postgresql_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> 
     info!("Waiting for standbys to connect to primary...");
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    let command = r#"docker exec tb-perf-postgres psql -U postgres -t -A -F',' -c "SELECT application_name, state, sync_state FROM pg_stat_replication;""#;
+    let command = r#"sudo docker exec tb-perf-postgres psql -U postgres -t -A -F',' -c "SELECT application_name, state, sync_state FROM pg_stat_replication;""#;
 
     let output = remote
         .run_command(&primary.name, &primary.zone, command)

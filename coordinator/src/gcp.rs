@@ -2,8 +2,44 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::process::Command;
 use tracing::{debug, warn};
+
+/// Timeout for a single remote SSH command (generous - some setup steps
+/// pull Docker images or run pg_basebackup).
+const RUN_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+/// Timeout for a single scp file transfer (small shell scripts only).
+const COPY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Raw OpenSSH options passed through to the underlying `ssh`/`scp` binary,
+/// so a first-time connection can NEVER silently hang waiting for
+/// interactive input (host key confirmation, SSH key generation, etc.):
+/// - `BatchMode=yes`: fails immediately instead of prompting for anything
+///   (passwords, host key confirmation, etc.)
+/// - `StrictHostKeyChecking=accept-new`: automatically trust and store a
+///   new host's key (still verifies on subsequent connections - this is
+///   safe here since we just created these instances ourselves) instead of
+///   prompting for a yes/no confirmation.
+///
+/// `gcloud compute ssh` and `gcloud compute scp` take these under different
+/// flag names (`--ssh-flag` vs `--scp-flag` respectively), hence the two
+/// separate helpers below rather than one shared flag list.
+const RAW_SSH_OPTIONS: [&str; 2] = ["-oBatchMode=yes", "-oStrictHostKeyChecking=accept-new"];
+
+fn ssh_flags() -> Vec<String> {
+    RAW_SSH_OPTIONS
+        .iter()
+        .map(|opt| format!("--ssh-flag={}", opt))
+        .collect()
+}
+
+fn scp_flags() -> Vec<String> {
+    RAW_SSH_OPTIONS
+        .iter()
+        .map(|opt| format!("--scp-flag={}", opt))
+        .collect()
+}
 
 /// A GCE instance as reported by `gcloud compute instances list --format=json`.
 /// Only the fields tb-perf actually needs are modeled here.
@@ -136,27 +172,43 @@ impl GcpRemote {
     }
 
     /// Run a command on a remote instance via IAP-tunneled SSH, returning stdout.
-    /// Fails if the remote command exits non-zero.
+    /// Fails if the remote command exits non-zero, or if it doesn't complete
+    /// within `RUN_COMMAND_TIMEOUT` (rather than hanging forever - see
+    /// `NONINTERACTIVE_SSH_FLAGS` for why this shouldn't normally happen).
     pub async fn run_command(&self, instance: &str, zone: &str, command: &str) -> Result<String> {
         debug!("[{}] running: {}", instance, command);
 
-        let output = Command::new("gcloud")
-            .args([
-                "compute",
-                "ssh",
-                instance,
-                "--project",
-                &self.project,
-                "--zone",
-                zone,
-                "--tunnel-through-iap",
-                "--command",
-                command,
-            ])
+        let mut args = vec![
+            "compute".to_string(),
+            "ssh".to_string(),
+            instance.to_string(),
+            "--project".to_string(),
+            self.project.clone(),
+            "--zone".to_string(),
+            zone.to_string(),
+            "--tunnel-through-iap".to_string(),
+            "--quiet".to_string(),
+        ];
+        args.extend(ssh_flags());
+        args.extend(["--command".to_string(), command.to_string()]);
+
+        let child = Command::new("gcloud")
+            .args(&args)
+            .stdin(Stdio::null()) // never let a prompt wait on input that will never arrive
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .output();
+
+        let output = tokio::time::timeout(RUN_COMMAND_TIMEOUT, child)
             .await
+            .with_context(|| {
+                format!(
+                    "Command on {} timed out after {:?} - if this is the first connection to \
+                     this instance, try running `gcloud compute ssh {} --zone {} \
+                     --tunnel-through-iap` manually once first",
+                    instance, RUN_COMMAND_TIMEOUT, instance, zone
+                )
+            })?
             .with_context(|| format!("Failed to SSH into {}", instance))?;
 
         if !output.status.success() {
@@ -183,6 +235,7 @@ impl GcpRemote {
     }
 
     /// Copy a local file/directory to a remote instance via IAP-tunneled scp.
+    /// Fails (rather than hanging) if it doesn't complete within `COPY_TIMEOUT`.
     pub async fn copy_to(
         &self,
         instance: &str,
@@ -203,16 +256,29 @@ impl GcpRemote {
             "--zone".to_string(),
             zone.to_string(),
             "--tunnel-through-iap".to_string(),
+            "--quiet".to_string(),
         ]);
+        args.extend(scp_flags());
 
         debug!("[{}] scp {} -> {}", instance, local_path, remote_path);
 
-        let output = Command::new("gcloud")
+        let child = Command::new("gcloud")
             .args(&args)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .output();
+
+        let output = tokio::time::timeout(COPY_TIMEOUT, child)
             .await
+            .with_context(|| {
+                format!(
+                    "scp to {} timed out after {:?} - if this is the first connection to this \
+                     instance, try running `gcloud compute ssh {} --zone {} \
+                     --tunnel-through-iap` manually once first",
+                    instance, COPY_TIMEOUT, instance, zone
+                )
+            })?
             .with_context(|| format!("Failed to scp to {}", instance))?;
 
         if !output.status.success() {
