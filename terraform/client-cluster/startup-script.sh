@@ -56,8 +56,9 @@ if [ ! -x /opt/rust/cargo/bin/cargo ]; then
   echo "Installing Rust toolchain..."
   mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-  chmod -R a+rX /opt/rust
 fi
+
+chmod -R a+rwX /opt/rust
 
 # Make cargo/rustc available on PATH for interactive login shells (SSH
 # --command invocations reference the full path directly instead, since
