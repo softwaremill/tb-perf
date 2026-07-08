@@ -297,7 +297,7 @@ mod tests {
                 concurrency: Some(10),
                 target_rate: None,
                 max_concurrency: None,
-                num_accounts: 100000,
+                num_accounts: 100,
                 zipfian_exponent: 1.0,
                 initial_balance: 1000000,
                 min_transfer_amount: 1,

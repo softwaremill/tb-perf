@@ -236,9 +236,7 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         }
     }
 
-    // 3. Discover already-provisioned client nodes and build the client
-    //    binary on each (terraform/client-cluster must have been applied
-    //    beforehand, same as the DB cluster).
+    // 3. Discover already-provisioned client nodes, build and deploy client binary
     let client_nodes = client_deploy::discover_client_nodes(&remote).await?;
     info!("Discovered {} client node(s)", client_nodes.len());
 
