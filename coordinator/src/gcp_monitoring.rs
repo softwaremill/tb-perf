@@ -12,6 +12,10 @@ pub struct MonitoringNode {
     /// Internal IP - client/DB nodes push metrics here (see terraform/network's
     /// `allow_metrics_to_monitoring` firewall rule), staying off the public internet.
     pub internal_ip: String,
+    /// External IP - the coordinator (running outside the VPC) queries
+    /// Prometheus here (see terraform/network's `allow_operator_to_monitoring`
+    /// firewall rule).
+    pub external_ip: String,
 }
 
 const LOCAL_TARBALL_PATH: &str = "/tmp/tb-perf-monitoring-stack.tar.gz";
@@ -30,11 +34,16 @@ pub async fn discover_monitoring_node(remote: &GcpRemote) -> Result<MonitoringNo
         .internal_ip()
         .context("Monitoring instance has no internal IP")?
         .to_string();
+    let external_ip = instance
+        .external_ip()
+        .context("Monitoring instance has no external IP")?
+        .to_string();
 
     Ok(MonitoringNode {
         name: instance.name.clone(),
         zone: instance.zone_name().to_string(),
         internal_ip,
+        external_ip,
     })
 }
 

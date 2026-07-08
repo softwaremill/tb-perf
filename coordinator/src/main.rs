@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tb_perf_common::Config;
 use tb_perf_common::config::{DatabaseType, DeploymentType};
 use tracing::{info, warn};
@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
             run_local_tests(&config, &args, &run_ctx).await?;
         }
         DeploymentType::Cloud => {
-            run_cloud_tests(&config, &args.config).await?;
+            run_cloud_tests(&config, &args.config, &run_ctx).await?;
         }
     }
 
@@ -193,7 +193,7 @@ async fn run_local_tests_inner(
     Ok(())
 }
 
-async fn run_cloud_tests(config: &Config, config_path: &str) -> Result<()> {
+async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContext) -> Result<()> {
     info!("Running cloud tests");
     info!("  Project: {:?}", config.deployment.gcp_project);
     info!("  Region: {:?}", config.deployment.gcp_region);
@@ -305,24 +305,106 @@ async fn run_cloud_tests(config: &Config, config_path: &str) -> Result<()> {
     let otel_endpoint = format!("http://{}:4317", monitoring_node.internal_ip);
 
     gcp_workload::deploy_config(&remote, &client_nodes, config_path).await?;
+
+    let warmup_duration = config.workload.warmup_duration_secs;
+    let test_duration = config.workload.test_duration_secs;
+
+    let spawn_unix_time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let start_time = Instant::now();
+
     gcp_workload::run_workload(
         &remote,
         &client_nodes,
         &db_args,
         &otel_endpoint,
-        config.workload.warmup_duration_secs,
-        config.workload.test_duration_secs,
+        warmup_duration,
+        test_duration,
     )
     .await?;
 
-    // TODO: remaining cloud orchestration (PLAN.md §3.4):
-    // 7. Aggregate results across clients and DB-side Prometheus metrics
-    // 8. Reset between runs, repeat for `coordinator.test_runs`
-    // 9. Export aggregated JSON results and sync back to ./results/
-    warn!(
-        "Workload execution complete - result aggregation/export and the \
-         multi-run loop are not yet implemented"
+    let elapsed = start_time.elapsed();
+
+    // 7. Verify balance correctness (double-entry invariant: total across
+    //    all accounts must be unchanged).
+    let expected_total = num_accounts * initial_balance;
+    let balance_ok = match config.database.kind {
+        DatabaseType::PostgreSQL => {
+            let primary = db_nodes
+                .first()
+                .context("No PostgreSQL primary discovered")?;
+            let pg_client = gcp_postgres_setup::wait_for_ready(&primary.external_ip, 30).await?;
+            gcp_postgres_setup::verify_total_balance(&pg_client, expected_total).await?
+        }
+        DatabaseType::TigerBeetle => {
+            let cluster_addresses: Vec<String> = db_nodes
+                .iter()
+                .map(|n| format!("{}:3000", n.external_ip))
+                .collect();
+            tigerbeetle_setup::verify_total_balance(
+                &cluster_addresses,
+                num_accounts,
+                expected_total,
+            )
+            .await?
+        }
+    };
+
+    // 8. Collect aggregated metrics from Prometheus (over its external IP -
+    //    see terraform/network's `allow_operator_to_monitoring` rule). Wait
+    //    first for the OTel collector to flush and Prometheus to scrape.
+    info!("Waiting for metrics to be available...");
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    let measurement_start = spawn_unix_time + warmup_duration as f64;
+    let prometheus_url = format!(
+        "http://{}:{}",
+        monitoring_node.external_ip, config.monitoring.prometheus_port
     );
+    let prometheus_client = prometheus::PrometheusClient::new(&prometheus_url);
+    let metrics = match prometheus_client.collect_metrics(measurement_start).await {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("Failed to collect metrics: {:?}", e);
+            prometheus::CollectedMetrics::default()
+        }
+    };
+
+    let total_transfers = metrics.completed_transfers + metrics.rejected_transfers;
+    let throughput_tps = if test_duration > 0 {
+        total_transfers as f64 / test_duration as f64
+    } else {
+        0.0
+    };
+
+    let run_result = results::RunResult {
+        run_id: 1,
+        duration_secs: elapsed.as_secs_f64(),
+        throughput_tps,
+        latency_p50_us: metrics.latency_p50_us,
+        latency_p95_us: metrics.latency_p95_us,
+        latency_p99_us: metrics.latency_p99_us,
+        latency_p999_us: metrics.latency_p999_us,
+        completed_transfers: metrics.completed_transfers,
+        rejected_transfers: metrics.rejected_transfers,
+        failed_transfers: metrics.failed_transfers,
+        balance_verified: balance_ok,
+    };
+
+    let mut test_results = results::TestResults::new(config.clone(), 1);
+    test_results.add_run(run_result);
+    if !balance_ok {
+        test_results.set_balance_error(1);
+    }
+    test_results.calculate_aggregates();
+    test_results.print_summary();
+    test_results.export_json(run_ctx.results_path().to_str().unwrap())?;
+
+    // TODO: remaining cloud orchestration (PLAN.md §3.4):
+    // 9. Reset between runs, repeat for `coordinator.test_runs` (currently single-run only)
+    info!("Cloud test run complete");
 
     Ok(())
 }
