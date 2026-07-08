@@ -10,6 +10,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod client_deploy;
 mod docker;
 mod gcp;
+mod gcp_monitoring;
 mod gcp_postgres_setup;
 mod gcp_setup;
 mod postgres_setup;
@@ -236,7 +237,13 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         }
     }
 
-    // 3. Discover already-provisioned client nodes, build and deploy client binary
+    // 3. Bring up the observability stack (OTel Collector + Prometheus +
+    //    Grafana) on the monitoring instance - idempotent, does not wipe
+    //    existing Prometheus data.
+    let monitoring_node = gcp_monitoring::discover_monitoring_node(&remote).await?;
+    gcp_monitoring::deploy_monitoring_stack(&remote, &monitoring_node).await?;
+
+    // 4. Discover already-provisioned client nodes, build and deploy client binary
     let client_nodes = client_deploy::discover_client_nodes(&remote).await?;
     info!("Discovered {} client node(s)", client_nodes.len());
 
@@ -252,7 +259,7 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
 
     client_deploy::deploy_client_binary(&remote, &client_nodes).await?;
 
-    // 4. Initialize accounts against the remote cluster (over its external
+    // 5. Initialize accounts against the remote cluster (over its external
     //    IP - the coordinator runs outside the VPC, see terraform/network's
     //    `allow_operator_to_db` firewall rule).
     let num_accounts = config.workload.num_accounts;
@@ -278,10 +285,10 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
     }
 
     // TODO: remaining cloud orchestration (PLAN.md §3.4):
-    // 5. Coordinate multi-client warmup/measurement execution
-    // 6. Aggregate results across clients and DB-side Prometheus metrics
-    // 7. Reset between runs, repeat for `coordinator.test_runs`
-    // 8. Export aggregated JSON results and sync back to ./results/
+    // 6. Coordinate multi-client warmup/measurement execution
+    // 7. Aggregate results across clients and DB-side Prometheus metrics
+    // 8. Reset between runs, repeat for `coordinator.test_runs`
+    // 9. Export aggregated JSON results and sync back to ./results/
     warn!(
         "DB cluster + client deployment + account initialization complete - \
          multi-client workload execution orchestration is not yet implemented"

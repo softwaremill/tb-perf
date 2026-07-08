@@ -41,8 +41,6 @@ pub async fn discover_client_nodes(remote: &GcpRemote) -> Result<Vec<ClientNode>
 /// cargo-zigbuild`, and `brew install zig llvm` (the latter for bindgen's
 /// libclang requirement - see README.md's Cloud Testing section).
 fn cross_compile_client() -> Result<String> {
-    info!("Cross-compiling client binary...");
-
     let libclang_path = std::process::Command::new("brew")
         .args(["--prefix", "llvm"])
         .output()
