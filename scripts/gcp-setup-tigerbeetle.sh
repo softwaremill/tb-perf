@@ -28,7 +28,7 @@ ADDRESSES="$(IFS=,; echo "$*")"
 
 DATA_DIR="/mnt/tb-perf-data/tigerbeetle"
 DATA_FILE="$DATA_DIR/${REPLICA_INDEX}_0.tigerbeetle"
-IMAGE="ghcr.io/tigerbeetle/tigerbeetle:0.16.11" # keep in sync with docker/docker-compose.tigerbeetle.yml
+IMAGE="ghcr.io/tigerbeetle/tigerbeetle:0.16.78" # keep in sync with docker/docker-compose.tigerbeetle.yml and tigerbeetle-unofficial's wrapped version in Cargo.toml
 CONTAINER_NAME="tb-perf-tigerbeetle"
 
 mkdir -p "$DATA_DIR"

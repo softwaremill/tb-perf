@@ -1,6 +1,6 @@
 services:
   tigerbeetle:
-    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.11
+    image: ghcr.io/tigerbeetle/tigerbeetle:0.16.78
     container_name: tb-perf-tigerbeetle
     # Docker's default seccomp profile blocks the io_uring syscalls
     # TigerBeetle requires, independent of the host kernel's io_uring
