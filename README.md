@@ -86,13 +86,19 @@ docker compose -f docker/docker-compose.tigerbeetle.yml -p tbperf up -d otel-col
 
 ## Cloud (GCP) Testing
 
-Cloud tests run TigerBeetle/PostgreSQL as a 3-node replicated cluster on GCP Compute Engine (see `PLAN.md` §3 for the full design). This is under active development - infrastructure provisioning and DB cluster bring-up are implemented and validated; client deployment, multi-client coordination, and result aggregation are not yet implemented.
+Cloud tests run TigerBeetle/PostgreSQL as a 3-node replicated cluster on GCP Compute Engine (see `PLAN.md` §3 for the full design). This is under active development - infrastructure provisioning, DB cluster bring-up, and client binary deployment are implemented and validated; multi-client coordination and result aggregation are not yet implemented.
 
 ### Prerequisites
 
 - A GCP project with billing enabled and the Compute Engine, IAP, and Cloud Storage APIs enabled
 - `gcloud` CLI, authenticated (`gcloud auth login && gcloud auth application-default login`)
 - Terraform >= 1.5
+- Cross-compilation toolchain, for building the client binary locally and shipping it to client nodes (see `coordinator/src/client_deploy.rs`) rather than building on each node:
+  ```bash
+  rustup target add x86_64-unknown-linux-gnu
+  brew install zig llvm       # llvm provides libclang, needed by tigerbeetle-unofficial's bindgen build step
+  cargo install cargo-zigbuild
+  ```
 
 ### 1. Provision infrastructure
 
@@ -107,11 +113,14 @@ terraform init && terraform apply
 
 cd ../database-cluster
 terraform init && terraform apply -var="database_type=tigerbeetle"  # or database_type=postgresql
+
+cd ../client-cluster
+terraform init && terraform apply -var="num_instances=5"
 ```
 
-This only provisions bare VMs with Docker/tooling installed - it does **not** start any database software.
+This only provisions bare VMs with Docker/tooling installed - it does **not** start any database software or deploy the client binary.
 
-### 2. Bring up the database cluster
+### 2. Bring up the database cluster, deploy the client, and initialize accounts
 
 The coordinator does this over `gcloud compute ssh --tunnel-through-iap` - no manual SSH required:
 
@@ -120,7 +129,7 @@ cargo build --release --bin coordinator
 ./target/release/coordinator -c config.cloud-tigerbeetle-fixedrate.toml   # or config.cloud-postgresql-fixedrate.toml
 ```
 
-This discovers the provisioned DB nodes (by GCP label), formats/starts a 3-node TigerBeetle cluster or bootstraps a 3-node synchronous PostgreSQL replication cluster (quorum-based, matching TigerBeetle's leader+1-of-3 write quorum), and verifies replication came up. It currently stops there - client deployment and workload execution are still TODO (see `PLAN.md` §3.4).
+This discovers the provisioned DB nodes (by GCP label), formats/starts a 3-node TigerBeetle cluster or bootstraps a 3-node synchronous PostgreSQL replication cluster (quorum-based, matching TigerBeetle's leader+1-of-3 write quorum), and verifies replication came up. It then cross-compiles the client binary locally and deploys it to each discovered client node, and initializes accounts against the cluster. It currently stops there - multi-client workload coordination and result aggregation are still TODO (see `PLAN.md` §3.4).
 
 ### 3. Tear down
 

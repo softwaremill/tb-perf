@@ -1,10 +1,10 @@
 #!/bin/bash
 # tb-perf client node startup-script.
 #
-# Installs Docker (for consistency/debugging use), Rust toolchain (in case
-# the client binary is built on-instance rather than pulled from GCS - see
-# PLAN.md §3.1), and the Google Cloud CLI (to pull the pre-built binary from
-# the artifacts bucket).
+# Installs Docker (for consistency/debugging use) and the Google Cloud CLI.
+# The client binary itself is cross-compiled locally (via cargo-zigbuild)
+# and shipped directly to each node - see coordinator/src/client_deploy.rs -
+# so no Rust toolchain is needed here.
 #
 # GCP re-runs startup-scripts on every boot, so everything here is
 # idempotent. This script is static (not templated) since client nodes are
@@ -43,31 +43,5 @@ if ! command -v gcloud >/dev/null 2>&1; then
   apt-get update
   apt-get install -y google-cloud-cli
 fi
-
-# --- Install Rust toolchain (used only if building the client on-instance) ---
-# Installed to a shared, world-readable location rather than the default
-# $HOME/.cargo - this startup-script runs as root, but the client binary is
-# built later over SSH as the OS-Login user, not root, so a root-only
-# /root/.cargo would be inaccessible to it.
-export RUSTUP_HOME=/opt/rust/rustup
-export CARGO_HOME=/opt/rust/cargo
-
-if [ ! -x /opt/rust/cargo/bin/cargo ]; then
-  echo "Installing Rust toolchain..."
-  mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-fi
-
-chmod -R a+rwX /opt/rust
-
-# Make cargo/rustc available on PATH for interactive login shells (SSH
-# --command invocations reference the full path directly instead, since
-# non-interactive shells don't source /etc/profile.d).
-cat >/etc/profile.d/tb-perf-cargo.sh <<'EOF'
-export RUSTUP_HOME=/opt/rust/rustup
-export CARGO_HOME=/opt/rust/cargo
-export PATH="/opt/rust/cargo/bin:$PATH"
-EOF
-chmod +r /etc/profile.d/tb-perf-cargo.sh
 
 echo "=== tb-perf client node startup complete ==="
