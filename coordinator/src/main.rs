@@ -252,7 +252,7 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         );
     }
 
-    client_deploy::build_client_binary(&remote, &client_nodes).await?;
+    client_deploy::deploy_client_binary(&remote, &client_nodes).await?;
 
     // 4. Initialize accounts against the remote cluster (over its external
     //    IP - the coordinator runs outside the VPC, see terraform/network's
