@@ -27,12 +27,24 @@ pub struct WorkloadMetrics {
 }
 
 impl WorkloadMetrics {
-    /// Initialize OpenTelemetry metrics with OTLP exporter
-    pub fn new(otel_endpoint: &str, database_type: &str, test_mode: &str) -> Result<Self> {
+    /// Initialize OpenTelemetry metrics with OTLP exporter.
+    ///
+    /// `instance_id` must be unique per client process. Without it, multiple
+    /// concurrent client instances (as used in cloud multi-client tests)
+    /// export identically-labeled metrics that collapse into a single
+    /// Prometheus time series instead of separate ones - silently
+    /// under-counting combined throughput instead of summing across clients.
+    pub fn new(
+        otel_endpoint: &str,
+        database_type: &str,
+        test_mode: &str,
+        instance_id: usize,
+    ) -> Result<Self> {
         let resource = Resource::new(vec![
             KeyValue::new("service.name", "tb-perf-client"),
             KeyValue::new("database.type", database_type.to_string()),
             KeyValue::new("test.mode", test_mode.to_string()),
+            KeyValue::new("client.instance_id", instance_id as i64),
         ]);
 
         let exporter = MetricExporter::builder()

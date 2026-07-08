@@ -13,6 +13,7 @@ mod gcp;
 mod gcp_monitoring;
 mod gcp_postgres_setup;
 mod gcp_setup;
+mod gcp_workload;
 mod postgres_setup;
 mod prometheus;
 mod results;
@@ -86,7 +87,7 @@ async fn main() -> Result<()> {
             run_local_tests(&config, &args, &run_ctx).await?;
         }
         DeploymentType::Cloud => {
-            run_cloud_tests(&config).await?;
+            run_cloud_tests(&config, &args.config).await?;
         }
     }
 
@@ -192,7 +193,7 @@ async fn run_local_tests_inner(
     Ok(())
 }
 
-async fn run_cloud_tests(config: &Config) -> Result<()> {
+async fn run_cloud_tests(config: &Config, config_path: &str) -> Result<()> {
     info!("Running cloud tests");
     info!("  Project: {:?}", config.deployment.gcp_project);
     info!("  Region: {:?}", config.deployment.gcp_region);
@@ -284,14 +285,43 @@ async fn run_cloud_tests(config: &Config) -> Result<()> {
         }
     }
 
+    // 6. Deploy config to client nodes and run the workload (using
+    //    internal IPs throughout - client/DB/monitoring nodes share a VPC).
+    let db_args = match config.database.kind {
+        DatabaseType::PostgreSQL => {
+            let primary = db_nodes
+                .first()
+                .context("No PostgreSQL primary discovered")?;
+            format!("--pg-host {} --pg-port 5432", primary.internal_ip)
+        }
+        DatabaseType::TigerBeetle => {
+            let addresses: Vec<String> = db_nodes
+                .iter()
+                .map(|n| format!("{}:3000", n.internal_ip))
+                .collect();
+            format!("--tb-addresses {}", addresses.join(","))
+        }
+    };
+    let otel_endpoint = format!("http://{}:4317", monitoring_node.internal_ip);
+
+    gcp_workload::deploy_config(&remote, &client_nodes, config_path).await?;
+    gcp_workload::run_workload(
+        &remote,
+        &client_nodes,
+        &db_args,
+        &otel_endpoint,
+        config.workload.warmup_duration_secs,
+        config.workload.test_duration_secs,
+    )
+    .await?;
+
     // TODO: remaining cloud orchestration (PLAN.md §3.4):
-    // 6. Coordinate multi-client warmup/measurement execution
     // 7. Aggregate results across clients and DB-side Prometheus metrics
     // 8. Reset between runs, repeat for `coordinator.test_runs`
     // 9. Export aggregated JSON results and sync back to ./results/
     warn!(
-        "DB cluster + client deployment + account initialization complete - \
-         multi-client workload execution orchestration is not yet implemented"
+        "Workload execution complete - result aggregation/export and the \
+         multi-run loop are not yet implemented"
     );
 
     Ok(())
