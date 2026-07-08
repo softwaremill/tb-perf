@@ -9,6 +9,9 @@ use tracing::info;
 pub struct MonitoringNode {
     pub name: String,
     pub zone: String,
+    /// Internal IP - client/DB nodes push metrics here (see terraform/network's
+    /// `allow_metrics_to_monitoring` firewall rule), staying off the public internet.
+    pub internal_ip: String,
 }
 
 const LOCAL_TARBALL_PATH: &str = "/tmp/tb-perf-monitoring-stack.tar.gz";
@@ -23,9 +26,15 @@ pub async fn discover_monitoring_node(remote: &GcpRemote) -> Result<MonitoringNo
         "No monitoring instance found - has `terraform apply` been run in terraform/monitoring?",
     )?;
 
+    let internal_ip = instance
+        .internal_ip()
+        .context("Monitoring instance has no internal IP")?
+        .to_string();
+
     Ok(MonitoringNode {
         name: instance.name.clone(),
         zone: instance.zone_name().to_string(),
+        internal_ip,
     })
 }
 

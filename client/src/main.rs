@@ -99,8 +99,13 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
         PostgresExecutorMode::Atomic => "postgresql_atomic",
         PostgresExecutorMode::Batched => "postgresql_batched",
     };
-    let metrics = WorkloadMetrics::new(&args.otel_endpoint, db_type_label, test_mode_str)
-        .context("Failed to initialize metrics")?;
+    let metrics = WorkloadMetrics::new(
+        &args.otel_endpoint,
+        db_type_label,
+        test_mode_str,
+        args.instance_id,
+    )
+    .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
     // Run workload based on executor mode
@@ -264,8 +269,13 @@ async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
     let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
-    let metrics = WorkloadMetrics::new(&args.otel_endpoint, "tigerbeetle", test_mode_str)
-        .context("Failed to initialize metrics")?;
+    let metrics = WorkloadMetrics::new(
+        &args.otel_endpoint,
+        "tigerbeetle",
+        test_mode_str,
+        args.instance_id,
+    )
+    .context("Failed to initialize metrics")?;
     let metrics_for_shutdown = metrics.clone();
 
     // Create workload runner
