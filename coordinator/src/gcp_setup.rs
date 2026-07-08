@@ -100,6 +100,27 @@ pub async fn setup_tigerbeetle_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> 
     Ok(())
 }
 
+/// Wipe existing TigerBeetle data and reformat+restart a fresh cluster -
+/// used between test runs. Unlike PostgreSQL's `reset_database` (a simple
+/// TRUNCATE), TigerBeetle has no in-place data reset, so the whole cluster
+/// must be wiped and reformatted from scratch.
+pub async fn reset_tigerbeetle_cluster(remote: &GcpRemote, nodes: &[DbNode]) -> Result<()> {
+    info!("Wiping TigerBeetle data on {} node(s)...", nodes.len());
+
+    for (index, node) in nodes.iter().enumerate() {
+        let wipe_command = format!(
+            "sudo docker rm -f tb-perf-tigerbeetle >/dev/null 2>&1; \
+             sudo rm -f /mnt/tb-perf-data/tigerbeetle/{index}_0.tigerbeetle"
+        );
+        remote
+            .run_command(&node.name, &node.zone, &wipe_command)
+            .await
+            .with_context(|| format!("Failed to wipe TigerBeetle data on {}", node.name))?;
+    }
+
+    setup_tigerbeetle_cluster(remote, nodes).await
+}
+
 /// Bring up a fresh 3-node PostgreSQL synchronous replication cluster
 /// (nodes[0] = primary, nodes[1..] = standbys). Requires exactly 3 nodes,
 /// matching the symmetric topology from PLAN.md §3.1 and the fixed

@@ -3,7 +3,7 @@ use clap::Parser;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tb_perf_common::Config;
 use tb_perf_common::config::{DatabaseType, DeploymentType};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -306,8 +306,96 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
 
     gcp_workload::deploy_config(&remote, &client_nodes, config_path).await?;
 
+    // 7. Run the workload `coordinator.test_runs` times, resetting the
+    //    database between runs (except after the last one).
+    let num_runs = config.coordinator.test_runs;
+    let mut test_results = results::TestResults::new(config.clone(), num_runs);
+
+    for run_id in 1..=num_runs {
+        info!("=== Starting run {}/{} ===", run_id, num_runs);
+
+        let run_result = run_single_cloud_test(
+            run_id,
+            &remote,
+            &client_nodes,
+            &db_nodes,
+            &monitoring_node,
+            config,
+            &db_args,
+            &otel_endpoint,
+        )
+        .await?;
+
+        let balance_ok = run_result.balance_verified;
+        test_results.add_run(run_result);
+        if !balance_ok {
+            error!("Balance verification failed for run {}", run_id);
+            test_results.set_balance_error(run_id);
+        }
+
+        if run_id < num_runs {
+            info!("Resetting database for next run...");
+            match config.database.kind {
+                DatabaseType::PostgreSQL => {
+                    let primary = db_nodes
+                        .first()
+                        .context("No PostgreSQL primary discovered")?;
+                    let pg_client =
+                        gcp_postgres_setup::wait_for_ready(&primary.external_ip, 30).await?;
+                    gcp_postgres_setup::reset_database(&pg_client, num_accounts, initial_balance)
+                        .await?;
+                }
+                DatabaseType::TigerBeetle => {
+                    gcp_setup::reset_tigerbeetle_cluster(&remote, &db_nodes).await?;
+                    let cluster_addresses: Vec<String> = db_nodes
+                        .iter()
+                        .map(|n| format!("{}:3000", n.external_ip))
+                        .collect();
+                    tigerbeetle_setup::wait_for_ready(&cluster_addresses, 60).await?;
+                    tigerbeetle_setup::init_accounts(
+                        &cluster_addresses,
+                        num_accounts,
+                        initial_balance,
+                    )
+                    .await?;
+                }
+            }
+
+            info!("Waiting 30s for system stabilization...");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+
+        info!("=== Completed run {}/{} ===", run_id, num_runs);
+    }
+
+    test_results.calculate_aggregates();
+    test_results.print_summary();
+    test_results.export_json(run_ctx.results_path().to_str().unwrap())?;
+
+    info!("Cloud test run complete");
+
+    Ok(())
+}
+
+/// Run a single measured iteration: run the client workload, verify the
+/// double-entry balance invariant, and collect aggregated metrics from
+/// Prometheus. Mirrors `test_runner.rs`'s local `run_single_test`, adapted
+/// for remote nodes and Prometheus reachable over its external IP.
+#[allow(clippy::too_many_arguments)]
+async fn run_single_cloud_test(
+    run_id: usize,
+    remote: &gcp::GcpRemote,
+    client_nodes: &[client_deploy::ClientNode],
+    db_nodes: &[gcp_setup::DbNode],
+    monitoring_node: &gcp_monitoring::MonitoringNode,
+    config: &Config,
+    db_args: &str,
+    otel_endpoint: &str,
+) -> Result<results::RunResult> {
     let warmup_duration = config.workload.warmup_duration_secs;
     let test_duration = config.workload.test_duration_secs;
+    let num_accounts = config.workload.num_accounts;
+    let initial_balance = config.workload.initial_balance;
 
     let spawn_unix_time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -316,10 +404,10 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
     let start_time = Instant::now();
 
     gcp_workload::run_workload(
-        &remote,
-        &client_nodes,
-        &db_args,
-        &otel_endpoint,
+        remote,
+        client_nodes,
+        db_args,
+        otel_endpoint,
         warmup_duration,
         test_duration,
     )
@@ -327,8 +415,8 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
 
     let elapsed = start_time.elapsed();
 
-    // 7. Verify balance correctness (double-entry invariant: total across
-    //    all accounts must be unchanged).
+    // Verify balance correctness (double-entry invariant: total across all
+    // accounts must be unchanged).
     let expected_total = num_accounts * initial_balance;
     let balance_ok = match config.database.kind {
         DatabaseType::PostgreSQL => {
@@ -352,9 +440,9 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
         }
     };
 
-    // 8. Collect aggregated metrics from Prometheus (over its external IP -
-    //    see terraform/network's `allow_operator_to_monitoring` rule). Wait
-    //    first for the OTel collector to flush and Prometheus to scrape.
+    // Collect aggregated metrics from Prometheus (over its external IP - see
+    // terraform/network's `allow_operator_to_monitoring` rule). Wait first
+    // for the OTel collector to flush and Prometheus to scrape.
     info!("Waiting for metrics to be available...");
     tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -379,8 +467,8 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
         0.0
     };
 
-    let run_result = results::RunResult {
-        run_id: 1,
+    Ok(results::RunResult {
+        run_id,
         duration_secs: elapsed.as_secs_f64(),
         throughput_tps,
         latency_p50_us: metrics.latency_p50_us,
@@ -391,20 +479,5 @@ async fn run_cloud_tests(config: &Config, config_path: &str, run_ctx: &RunContex
         rejected_transfers: metrics.rejected_transfers,
         failed_transfers: metrics.failed_transfers,
         balance_verified: balance_ok,
-    };
-
-    let mut test_results = results::TestResults::new(config.clone(), 1);
-    test_results.add_run(run_result);
-    if !balance_ok {
-        test_results.set_balance_error(1);
-    }
-    test_results.calculate_aggregates();
-    test_results.print_summary();
-    test_results.export_json(run_ctx.results_path().to_str().unwrap())?;
-
-    // TODO: remaining cloud orchestration (PLAN.md §3.4):
-    // 9. Reset between runs, repeat for `coordinator.test_runs` (currently single-run only)
-    info!("Cloud test run complete");
-
-    Ok(())
+    })
 }
