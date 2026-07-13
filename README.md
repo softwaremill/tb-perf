@@ -26,10 +26,17 @@ tb-perf/
 - Terraform (for cloud deployments)
 - GCP project + credentials (for cloud deployments) - see `terraform/README.md`
 
+Building any workspace crate compiles `tigerbeetle-unofficial`, whose build step needs a specific pinned Zig (0.14.1). It normally downloads Zig itself, but its bundled mirror is currently unreachable - so run `scripts/setup-zig.sh` first, which fetches the correct version (checksum-verified) from ziglang.org and exports `ZIG_PATH`:
+
+```bash
+source scripts/setup-zig.sh   # caches Zig under .zig/ and sets ZIG_PATH for the current shell
+```
+
 ## Running Tests
 
 ```bash
-# Build first (rebuilds only if source changed)
+# Fetch the pinned Zig the build needs (see Prerequisites), then build
+source scripts/setup-zig.sh
 cargo build --release
 
 # PostgreSQL sanity checks (~30 seconds each)
@@ -96,9 +103,10 @@ Cloud tests run TigerBeetle/PostgreSQL as a 3-node replicated cluster on GCP Com
 - Cross-compilation toolchain, for building the client binary locally and shipping it to client nodes (see `coordinator/src/client_deploy.rs`) rather than building on each node:
   ```bash
   rustup target add x86_64-unknown-linux-gnu
-  brew install zig llvm       # llvm provides libclang, needed by tigerbeetle-unofficial's bindgen build step
+  brew install zig llvm       # zig: cross-linker used by cargo-zigbuild; llvm: libclang for tigerbeetle-unofficial's bindgen step
   cargo install cargo-zigbuild
   ```
+  The separate pinned Zig that `tigerbeetle-unofficial` uses to compile TigerBeetle's C client comes from `scripts/setup-zig.sh` (see the Quick Start prerequisites). The coordinator runs that script automatically whenever `ZIG_PATH` is unset, so no extra step is needed for the cross-compile itself.
 
 ### 1. Provision infrastructure
 
@@ -366,6 +374,13 @@ Wait 15-20 seconds after the test starts. OTel Collector flushes every 5 seconds
 ### Balance verification failed
 
 This indicates a correctness issue - the total balance across all accounts changed during the test. This should never happen with properly implemented double-entry accounting.
+
+### "`download` script failed" during `cargo build`
+
+`tigerbeetle-unofficial`'s build script failed to download its pinned Zig (its bundled mirror is unreachable). Provide Zig yourself before building:
+```bash
+source scripts/setup-zig.sh
+```
 
 ## License
 

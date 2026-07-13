@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Timeout for a single remote SSH command (generous - some setup steps
 /// pull Docker images or run pg_basebackup).
@@ -238,14 +238,6 @@ impl GcpRemote {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    }
-
-    /// Run a command on a remote instance, warning (not failing) on error.
-    /// Useful for best-effort cleanup steps.
-    pub async fn run_command_best_effort(&self, instance: &str, zone: &str, command: &str) {
-        if let Err(e) = self.run_command(instance, zone, command).await {
-            warn!("[{}] best-effort command failed: {:?}", instance, e);
-        }
     }
 
     /// Copy a local file/directory to a remote instance via IAP-tunneled scp.

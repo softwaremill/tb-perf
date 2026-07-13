@@ -14,6 +14,26 @@ pub struct ClientNode {
 const CROSS_TARGET: &str = "x86_64-unknown-linux-gnu";
 const LOCAL_BINARY_PATH: &str = "target/x86_64-unknown-linux-gnu/release/client";
 const REMOTE_BINARY_PATH: &str = "client";
+const SETUP_ZIG_SCRIPT: &str = "scripts/setup-zig.sh";
+
+/// Resolve the pinned Zig that `tigerbeetle-unofficial-sys` needs to build
+/// TigerBeetle's C client. Honors an already-set `ZIG_PATH`; otherwise runs
+/// `scripts/setup-zig.sh`, which downloads/caches the correct version and
+/// prints its path. Without this, the crate's build script tries to download
+/// Zig from a mirror that is currently unreachable and the build fails.
+fn resolve_zig_path() -> Option<String> {
+    if let Some(existing) = std::env::var_os("ZIG_PATH") {
+        return Some(existing.to_string_lossy().into_owned());
+    }
+
+    info!("ZIG_PATH not set - running {} to fetch Zig", SETUP_ZIG_SCRIPT);
+    let output = std::process::Command::new(SETUP_ZIG_SCRIPT).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!path.is_empty()).then_some(path)
+}
 
 /// Discover client instances (provisioned by terraform/client-cluster),
 /// ordered by client index (see `GcpInstance::index_label`).
@@ -40,6 +60,10 @@ pub async fn discover_client_nodes(remote: &GcpRemote) -> Result<Vec<ClientNode>
 /// coordinator: `rustup target add x86_64-unknown-linux-gnu`, `cargo install
 /// cargo-zigbuild`, and `brew install zig llvm` (the latter for bindgen's
 /// libclang requirement - see README.md's Cloud Testing section).
+///
+/// `LIBCLANG_PATH` and `ZIG_PATH` are resolved automatically if unset (via
+/// `brew --prefix llvm` and `scripts/setup-zig.sh` respectively), so no manual
+/// environment setup is needed.
 fn cross_compile_client() -> Result<String> {
     let libclang_path = std::process::Command::new("brew")
         .args(["--prefix", "llvm"])
@@ -47,6 +71,8 @@ fn cross_compile_client() -> Result<String> {
         .ok()
         .filter(|o| o.status.success())
         .map(|o| format!("{}/lib", String::from_utf8_lossy(&o.stdout).trim()));
+
+    let zig_path = resolve_zig_path();
 
     let mut cmd = std::process::Command::new("cargo");
     cmd.args([
@@ -62,6 +88,10 @@ fn cross_compile_client() -> Result<String> {
 
     if let Some(path) = &libclang_path {
         cmd.env("LIBCLANG_PATH", path);
+    }
+
+    if let Some(path) = &zig_path {
+        cmd.env("ZIG_PATH", path);
     }
 
     let output = cmd.output().context(
