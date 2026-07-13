@@ -31,3 +31,6 @@ config.local.toml
 
 # TB binary
 tigerbeetle
+
+# Zig toolchain downloaded by scripts/setup-zig.sh
+.zig/

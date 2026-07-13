@@ -141,6 +141,7 @@ echo ""
 # Build the project
 echo "Building project..."
 cd "$PROJECT_DIR"
+source "$SCRIPT_DIR/setup-zig.sh"   # provides ZIG_PATH for tigerbeetle-unofficial's C client build
 cargo build --release
 
 # Run the test based on database type
