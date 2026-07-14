@@ -37,6 +37,29 @@ struct Args {
     /// OpenTelemetry collector endpoint
     #[arg(long, default_value = "http://localhost:4317")]
     otel_endpoint: String,
+
+    /// Total number of client instances sharing this test (fixed_rate mode's
+    /// target_rate/max_concurrency are cluster-wide totals in the config, so
+    /// each instance divides by this count to get its own share)
+    #[arg(long, default_value = "1")]
+    num_client_nodes: u64,
+}
+
+/// Splits a cluster-wide fixed_rate budget evenly across client instances.
+/// `config.workload.target_rate`/`max_concurrency` are documented as totals
+/// across all client nodes, but each node runs against the same config file -
+/// so every instance must divide by the node count itself before dispatching.
+fn per_instance_test_mode(test_mode: TestMode, num_client_nodes: u64) -> TestMode {
+    match test_mode {
+        TestMode::FixedRate {
+            target_rate,
+            max_concurrency,
+        } => TestMode::FixedRate {
+            target_rate: (target_rate / num_client_nodes).max(1),
+            max_concurrency: ((max_concurrency as u64) / num_client_nodes).max(1) as usize,
+        },
+        other => other,
+    }
 }
 
 #[tokio::main]
@@ -90,7 +113,7 @@ async fn run_postgresql_workload(config: &Config, args: &Args) -> Result<()> {
         info!("  Connection pool size: {}", pg_config.connection_pool_size);
     }
 
-    let test_mode = config.workload.test_mode()?;
+    let test_mode = per_instance_test_mode(config.workload.test_mode()?, args.num_client_nodes);
     let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
@@ -265,7 +288,7 @@ async fn run_tigerbeetle_workload(config: &Config, args: &Args) -> Result<()> {
         .collect();
     info!("  Cluster addresses: {:?}", addresses);
 
-    let test_mode = config.workload.test_mode()?;
+    let test_mode = per_instance_test_mode(config.workload.test_mode()?, args.num_client_nodes);
     let test_mode_str = test_mode.as_str();
 
     // Initialize metrics
