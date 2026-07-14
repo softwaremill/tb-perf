@@ -54,15 +54,17 @@ pub async fn run_workload(
         Duration::from_secs(warmup_duration_secs + test_duration_secs) + TIMEOUT_BUFFER;
 
     let mut handles = Vec::new();
+    let num_client_nodes = nodes.len();
 
     for (index, node) in nodes.iter().enumerate() {
         let remote = remote.clone();
         let node = node.clone();
         let command = format!(
-            "{binary} -c {config} --instance-id {index} {db_args} --otel-endpoint {otel}",
+            "{binary} -c {config} --instance-id {index} --num-client-nodes {num_client_nodes} {db_args} --otel-endpoint {otel}",
             binary = REMOTE_BINARY_PATH,
             config = REMOTE_CONFIG_PATH,
             index = index,
+            num_client_nodes = num_client_nodes,
             db_args = db_args,
             otel = otel_endpoint,
         );
