@@ -1,0 +1,4 @@
+run_number,tps,latency_p50_us,latency_p95_us,latency_p99_us,latency_p999_us,error_rate,completed_transfers,rejected_transfers,results_directory
+1,4064.48,32264,509381,749088,988138,0,1212565,6780,../results/run_20260714_073817
+2,4123.37,32309,511095,754691,991998,0,1230415,6597,../results/run_20260714_073817
+3,4103.58,32292,504117,739988,980624,0,1223786,7287,../results/run_20260714_073817
