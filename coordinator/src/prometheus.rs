@@ -31,6 +31,7 @@ pub struct CollectedMetrics {
     pub completed_transfers: u64,
     pub rejected_transfers: u64,
     pub failed_transfers: u64,
+    pub dropped_transfers: u64,
     pub latency_p50_us: u64,
     pub latency_p95_us: u64,
     pub latency_p99_us: u64,
@@ -41,10 +42,11 @@ impl std::fmt::Display for CollectedMetrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "completed={}, rejected={}, failed={}, latency_us(p50={}, p95={}, p99={}, p999={})",
+            "completed={}, rejected={}, failed={}, dropped={}, latency_us(p50={}, p95={}, p99={}, p999={})",
             self.completed_transfers,
             self.rejected_transfers,
             self.failed_transfers,
+            self.dropped_transfers,
             self.latency_p50_us,
             self.latency_p95_us,
             self.latency_p99_us,
@@ -187,6 +189,7 @@ impl PrometheusClient {
         const COMPLETED: &str = "tbperf_transfers_completed_total";
         const REJECTED: &str = "tbperf_transfers_rejected_total";
         const FAILED: &str = "tbperf_transfers_failed_total";
+        const DROPPED: &str = "tbperf_requests_dropped_total";
         const LATENCY: &str = "tbperf_transfer_latency_us";
 
         // Query counters
@@ -198,6 +201,9 @@ impl PrometheusClient {
         }
         if let Some(v) = self.query_counter(FAILED, &range, query_time).await? {
             metrics.failed_transfers = v;
+        }
+        if let Some(v) = self.query_counter(DROPPED, &range, query_time).await? {
+            metrics.dropped_transfers = v;
         }
 
         // Query latency percentiles
@@ -241,6 +247,7 @@ mod tests {
         assert_eq!(metrics.completed_transfers, 0);
         assert_eq!(metrics.rejected_transfers, 0);
         assert_eq!(metrics.failed_transfers, 0);
+        assert_eq!(metrics.dropped_transfers, 0);
         assert_eq!(metrics.latency_p50_us, 0);
     }
 
