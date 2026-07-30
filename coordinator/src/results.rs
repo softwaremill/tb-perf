@@ -17,6 +17,7 @@ pub struct RunResult {
     pub completed_transfers: u64,
     pub rejected_transfers: u64,
     pub failed_transfers: u64,
+    pub dropped_transfers: u64,
     pub balance_verified: bool,
 }
 
@@ -91,6 +92,7 @@ pub struct AggregateResults {
     pub total_completed: u64,
     pub total_rejected: u64,
     pub total_failed: u64,
+    pub total_dropped: u64,
     pub error_rate: f64,
 }
 
@@ -141,6 +143,7 @@ impl TestResults {
         let total_completed: u64 = self.runs.iter().map(|r| r.completed_transfers).sum();
         let total_rejected: u64 = self.runs.iter().map(|r| r.rejected_transfers).sum();
         let total_failed: u64 = self.runs.iter().map(|r| r.failed_transfers).sum();
+        let total_dropped: u64 = self.runs.iter().map(|r| r.dropped_transfers).sum();
 
         let total_requests = total_completed + total_rejected + total_failed;
         let error_rate = if total_requests > 0 {
@@ -183,6 +186,7 @@ impl TestResults {
             total_completed,
             total_rejected,
             total_failed,
+            total_dropped,
             error_rate,
         });
     }
@@ -233,6 +237,7 @@ impl TestResults {
             info!("  Completed: {}", agg.total_completed);
             info!("  Rejected:  {}", agg.total_rejected);
             info!("  Failed:    {}", agg.total_failed);
+            info!("  Dropped:   {} (max_concurrency reached)", agg.total_dropped);
             info!("  Error rate: {:.2}%", agg.error_rate * 100.0);
         }
 
@@ -349,8 +354,25 @@ mod tests {
             completed_transfers: completed,
             rejected_transfers: 0,
             failed_transfers: failed,
+            dropped_transfers: 0,
             balance_verified: true,
         }
+    }
+
+    #[test]
+    fn test_calculate_aggregates_total_dropped() {
+        let config = make_test_config();
+        let mut results = TestResults::new(config, 2);
+        let mut run1 = make_run_result(1, 1000.0, 10000, 0);
+        run1.dropped_transfers = 50;
+        let mut run2 = make_run_result(2, 1000.0, 10000, 0);
+        run2.dropped_transfers = 75;
+        results.add_run(run1);
+        results.add_run(run2);
+        results.calculate_aggregates();
+
+        let agg = results.aggregate.unwrap();
+        assert_eq!(agg.total_dropped, 125);
     }
 
     #[test]
