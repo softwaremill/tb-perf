@@ -34,3 +34,6 @@ tigerbeetle
 
 # Zig toolchain downloaded by scripts/setup-zig.sh
 .zig/
+
+# Subagent-driven-development scratch workspace
+.superpowers/
