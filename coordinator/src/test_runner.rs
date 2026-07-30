@@ -287,8 +287,8 @@ impl<'a> TestRunner<'a> {
         let metrics = match self.prometheus.collect_metrics(measurement_start).await {
             Ok(m) => {
                 info!(
-                    "Collected metrics: completed={}, rejected={}, failed={}",
-                    m.completed_transfers, m.rejected_transfers, m.failed_transfers
+                    "Collected metrics: completed={}, rejected={}, failed={}, dropped={}",
+                    m.completed_transfers, m.rejected_transfers, m.failed_transfers, m.dropped_transfers
                 );
                 m
             }
@@ -316,6 +316,7 @@ impl<'a> TestRunner<'a> {
             completed_transfers: metrics.completed_transfers,
             rejected_transfers: metrics.rejected_transfers,
             failed_transfers: metrics.failed_transfers,
+            dropped_transfers: metrics.dropped_transfers,
             balance_verified: client_success,
         })
     }

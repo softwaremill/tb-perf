@@ -478,6 +478,7 @@ async fn run_single_cloud_test(
         completed_transfers: metrics.completed_transfers,
         rejected_transfers: metrics.rejected_transfers,
         failed_transfers: metrics.failed_transfers,
+        dropped_transfers: metrics.dropped_transfers,
         balance_verified: balance_ok,
     })
 }
