@@ -498,4 +498,24 @@ mod tests {
         config.coordinator.test_runs = 0;
         assert!(config.validate().is_err());
     }
+
+    #[test]
+    fn test_new_hotspot_knob_sweep_configs_parse_and_validate() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let files = [
+            "config.cloud-tigerbeetle-hotspot-concurrency5k.toml",
+            "config.cloud-tigerbeetle-hotspot-rate10k.toml",
+            "config.cloud-postgresql-hotspot-concurrency5k.toml",
+            "config.cloud-postgresql-hotspot-rate10k.toml",
+            "config.cloud-postgresql-atomic-hotspot-concurrency5k.toml",
+            "config.cloud-postgresql-atomic-hotspot-rate10k.toml",
+        ];
+        for file in files {
+            let path = repo_root.join(file);
+            let config = Config::from_file(&path)
+                .unwrap_or_else(|e| panic!("failed to parse/validate {}: {:?}", file, e));
+            assert_eq!(config.workload.zipfian_exponent, 2.0, "{file}: wrong skew");
+            assert_eq!(config.deployment.num_client_nodes, Some(5), "{file}: wrong client count");
+        }
+    }
 }
