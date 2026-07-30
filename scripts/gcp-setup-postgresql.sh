@@ -62,7 +62,7 @@ case "$ROLE" in
       "$IMAGE" \
       postgres \
         -c listen_addresses='*' \
-        -c max_connections=200 \
+        -c max_connections=300 \
         -c shared_buffers=256MB \
         -c wal_level=replica \
         -c max_wal_senders=10 \
@@ -136,7 +136,7 @@ case "$ROLE" in
       postgres \
         -c listen_addresses='*' \
         -c hot_standby=on \
-        -c max_connections=200 \
+        -c max_connections=300 \
         -c max_wal_senders=10 \
         -c max_replication_slots=10
 
