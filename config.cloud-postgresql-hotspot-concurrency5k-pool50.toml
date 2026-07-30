@@ -1,0 +1,51 @@
+# Cloud PostgreSQL (standard executor) hotspot-contention test configuration
+# - concurrency sweep, pool50 variant. Same as
+# config.cloud-postgresql-hotspot-concurrency5k.toml, but connection_pool_size
+# raised from 20 to 50 - the concurrency5k/rate10k sweep found PostgreSQL
+# throughput got *worse* when max_concurrency was raised while
+# connection_pool_size stayed fixed at 20, pointing at the connection pool
+# (not the concurrency cap) as PostgreSQL's real bottleneck. See
+# hotspot-knob-sweep-results.md for the full analysis.
+
+[workload]
+test_mode = "fixed_rate"
+target_rate = 5000 # Total requests/sec across all client instances
+max_concurrency = 5000
+num_accounts = 100000
+zipfian_exponent = 2.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 120
+test_duration_secs = 300
+
+[database]
+type = "postgresql"
+
+[postgresql]
+isolation_level = "read_committed"
+connection_pool_size = 50
+connection_pool_min_idle = 50
+executor_mode = "standard"
+
+[deployment]
+type = "cloud"
+num_db_nodes = 3
+num_client_nodes = 5
+gcp_project = "tigerbettle-sandbox"
+gcp_region = "europe-central2"
+db_machine_type = "n2-highmem-4"
+client_machine_type = "n2-standard-2"
+measure_network_latency = true
+
+[coordinator]
+test_runs = 3
+max_variance_threshold = 0.10
+max_error_rate = 0.05
+metrics_export_path = "./results"
+keep_grafana_running = true
+
+[monitoring]
+grafana_port = 3000
+prometheus_port = 9090
+otel_collector_port = 4317
