@@ -93,6 +93,64 @@ sweep - a natural next test is raising `connection_pool_size` (e.g. to
 100-200) at the *baseline* `max_concurrency`/`target_rate` to see whether
 that's the real lever.
 
+## Follow-up: connection_pool_size=50 (both executors, both knob variants)
+
+Four more configs (`*-pool50.toml`) re-ran the `concurrency5k`/`rate10k`
+knob values above with `connection_pool_size` raised from 20 to 50, to
+test whether the connection pool is actually the lever. First attempt hit
+a second, real bottleneck: **PostgreSQL's server-side `max_connections`
+was still 200** (`scripts/gcp-setup-postgresql.sh`), and 5 client nodes x
+50 connections each = 250 total client connections exceeds that - so
+raising the pool size just moved the ceiling from "client waits for a
+free pooled connection" to "server refuses the connection outright." The
+first `concurrency5k` (standard executor) run at pool_size=50 completed
+with a **68% error rate** (`"Failed to get connection"`), throughput
+collapsing to 356 TPS - worse than doing nothing. Retroactively, this also
+explains the *original* baseline: 5 x 20 = exactly 100, meaning pool=20
+was already sitting exactly at PostgreSQL's default `max_connections`
+before anyone even set it to 200 explicitly.
+
+Fix: raised `max_connections` to 300 in both the primary and standby
+`docker run` invocations in `scripts/gcp-setup-postgresql.sh` (both must
+match - a standby's `max_connections` must be >= the primary's or it
+refuses to start). With that in place, all four pool50 configs completed
+cleanly - 0 failed transfers, 0% error rate, balance verified 3/3 in every
+test:
+
+| | Standard `FOR UPDATE` | Atomic |
+|---|---|---|
+| baseline (pool=20, cap=1000/client) | 753 TPS | 977 TPS |
+| concurrency5k (pool=20, cap=5000 total) | 683 TPS | 878 TPS |
+| **concurrency5k, pool=50** | **642 TPS** | **784 TPS** |
+| rate10k (pool=20, cap=5000 total) | 703 TPS | 867 TPS |
+| **rate10k, pool=50** | **653 TPS** | **796 TPS** |
+
+Raising the pool 2.5x (20 -> 50) did **not** raise throughput for either
+executor - if anything, standard came in slightly lower than its pool=20
+`concurrency5k`/`rate10k` numbers, and atomic landed a bit lower than its
+own pool=20 numbers too, though within a similar range. Both executors
+remain far below their own *original* baseline (753/977 TPS), and further
+below TigerBeetle's equivalent numbers (5,060-9,431 TPS). Every latency
+percentile is still pegged at the 5-second histogram-bucket ceiling in
+every pool50 config (see the design-doc caveat on this in
+`docs/superpowers/specs/2026-07-30-cloud-knob-sweep-design.md` discussion -
+`client/src/metrics.rs:125` caps the exported histogram at 5,000,000us, so
+these numbers say "at least 5s," not "exactly 5s").
+
+**Conclusion: `connection_pool_size` was not the real lever either**, once
+`max_connections` stopped being the confound. Under heavy hotspot skew,
+PostgreSQL's bottleneck for both executors is very likely the row-lock
+contention on `FOR UPDATE` (standard) or the implicit lock in the atomic
+`UPDATE ... WHERE balance >= amount` (atomic) - exactly the mechanism the
+very first local/cloud comparison (`tigerbeetle-vs-postgresql.md`)
+identified as PostgreSQL's fundamental weak point under contention. More
+available connections just means more transactions competing for the same
+few hot rows, not more real parallelism. None of the three knobs tested
+across this whole sweep (`max_concurrency`, `target_rate`,
+`connection_pool_size`) meaningfully move PostgreSQL's throughput under
+hotspot skew - which is itself a meaningful result: the constraint is
+architectural, not a tuning gap.
+
 ## Two infrastructure issues hit along the way
 
 Neither affects the final numbers above (all runs shown passed balance
@@ -119,20 +177,35 @@ idempotent (e.g. skip funding for accounts whose balance is already
 `initial_balance`).
 
 **Occasional simultaneous SSH/IAP disconnects on all client nodes** during
-an unusually long client-side graceful-drain phase - hit once with
-TigerBeetle's first `rate10k` attempt and once with PostgreSQL atomic's
-first `concurrency5k` attempt (specifically on the *third* of three runs
-in each case, after two prior runs completed cleanly on the same
-invocation). All five client SSH connections failed near-simultaneously
-with `Broken pipe` / exit 255, roughly 12 minutes after the run started -
-longer than the coordinator's own 480s (8 minute) per-run timeout
+an unusually long client-side graceful-drain phase - hit repeatedly across
+this whole investigation (TigerBeetle's first `rate10k` attempt,
+PostgreSQL atomic's first `concurrency5k` attempt, and twice more during
+the pool50 follow-up), always on the *third* of three runs after the first
+two completed cleanly on the same invocation, and once as long as 23
+minutes into the run rather than the usual ~12. All five client SSH
+connections fail near-simultaneously with `Broken pipe` / exit 255 - later
+than the coordinator's own 480s (8 minute) per-run timeout
 (`coordinator/src/gcp_workload.rs`), so this doesn't look like that
 timeout firing cleanly; more likely an IAP tunnel-level idle/session limit
-tripped while the client was stuck draining a large in-flight backlog.
-Resolved by simply retrying the whole test, which succeeded cleanly both
-times. Not investigated further here since it didn't block getting valid
-results, but worth a note for anyone extending this sweep to even higher
-concurrency values where drain time may grow further.
+tripped while the client is stuck draining a large in-flight backlog (the
+one 23-minute instance happened on `connection_pool_size=50` *before* the
+`max_connections` fix below, when connections were being refused
+server-side rather than just queued - a plausibly even larger backlog to
+drain). Resolved every time by simply retrying the whole test. Not
+investigated further here since it never blocked getting valid results,
+but worth a note for anyone extending this sweep further, especially at
+higher concurrency where drain time may grow more.
+
+**PostgreSQL's `max_connections` (200) becomes a hard ceiling once
+`connection_pool_size` is raised enough that clients x pool exceeds it** -
+see the pool50 section above. This is really a config gap rather than a
+transient issue: the setup script (`scripts/gcp-setup-postgresql.sh`)
+hardcoded `max_connections=200` for both primary and standbys, which
+happened to be enough headroom for the pool=20 baseline (5 x 20 = 100
+connections) and the pool=20 concurrency5k/rate10k configs (same pool
+size, only the client-side cap changed) but not for pool=50 (5 x 50 =
+250). Fixed by raising it to 300 in both places (primary and standby
+values must match or the standby refuses to start).
 
 ## Raw results
 
@@ -624,6 +697,334 @@ Result file: `results/run_20260730_101757/results.json`
     "total_rejected": 230167,
     "total_failed": 0,
     "total_dropped": 8363650,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### PostgreSQL standard, concurrency5k, pool_size=50
+
+Result file: `results/run_20260730_123025/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "PostgreSQL",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 431.151656209,
+      "throughput_tps": 660.1433333333333,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 140724,
+      "rejected_transfers": 57319,
+      "failed_transfers": 0,
+      "dropped_transfers": 1334751,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 433.275300666,
+      "throughput_tps": 635.4433333333334,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 135566,
+      "rejected_transfers": 55067,
+      "failed_transfers": 0,
+      "dropped_transfers": 1328058,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 432.666202541,
+      "throughput_tps": 631.4033333333333,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 134838,
+      "rejected_transfers": 54583,
+      "failed_transfers": 0,
+      "dropped_transfers": 1352634,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 642.3299999999999,
+      "stddev": 12.703451849355302,
+      "cv": 0.019777142355728836,
+      "min": 631.4033333333333,
+      "max": 660.1433333333333
+    },
+    "latency_p50": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p95": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p99": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p999": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "total_completed": 411128,
+    "total_rejected": 166969,
+    "total_failed": 0,
+    "total_dropped": 4015443,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### PostgreSQL standard, rate10k, pool_size=50
+
+Result file: `results/run_20260731_070224/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "PostgreSQL",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 432.290006708,
+      "throughput_tps": 646.2266666666667,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 137484,
+      "rejected_transfers": 56384,
+      "failed_transfers": 0,
+      "dropped_transfers": 2816688,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 432.811347375,
+      "throughput_tps": 664.2533333333333,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 141526,
+      "rejected_transfers": 57750,
+      "failed_transfers": 0,
+      "dropped_transfers": 2879711,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 432.911271542,
+      "throughput_tps": 647.3766666666667,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 138487,
+      "rejected_transfers": 55726,
+      "failed_transfers": 0,
+      "dropped_transfers": 2838146,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 652.6188888888888,
+      "stddev": 8.240179939303427,
+      "cv": 0.012626327676988756,
+      "min": 646.2266666666667,
+      "max": 664.2533333333333
+    },
+    "latency_p50": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p95": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p99": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p999": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "total_completed": 417497,
+    "total_rejected": 169860,
+    "total_failed": 0,
+    "total_dropped": 8534545,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### PostgreSQL atomic, concurrency5k, pool_size=50
+
+Result file: `results/run_20260731_072822/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "PostgreSQL",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 429.809767917,
+      "throughput_tps": 774.94,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 164760,
+      "rejected_transfers": 67722,
+      "failed_transfers": 0,
+      "dropped_transfers": 1279277,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 430.263030458,
+      "throughput_tps": 785.55,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 166090,
+      "rejected_transfers": 69575,
+      "failed_transfers": 0,
+      "dropped_transfers": 1292488,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 430.433753958,
+      "throughput_tps": 790.8066666666666,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 167818,
+      "rejected_transfers": 69424,
+      "failed_transfers": 0,
+      "dropped_transfers": 1295552,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 783.7655555555556,
+      "stddev": 6.59929083357994,
+      "cv": 0.00841998067764304,
+      "min": 774.94,
+      "max": 790.8066666666666
+    },
+    "latency_p50": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p95": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p99": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p999": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "total_completed": 498668,
+    "total_rejected": 206721,
+    "total_failed": 0,
+    "total_dropped": 3867317,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### PostgreSQL atomic, rate10k, pool_size=50
+
+Result file: `results/run_20260731_075326/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "PostgreSQL",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 430.836118291,
+      "throughput_tps": 791.71,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 169180,
+      "rejected_transfers": 68333,
+      "failed_transfers": 0,
+      "dropped_transfers": 2823005,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 431.468291375,
+      "throughput_tps": 800.9633333333334,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 169680,
+      "rejected_transfers": 70609,
+      "failed_transfers": 0,
+      "dropped_transfers": 2829450,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 432.339816541,
+      "throughput_tps": 795.08,
+      "latency_p50_us": 5000000,
+      "latency_p95_us": 5000000,
+      "latency_p99_us": 5000000,
+      "latency_p999_us": 5000000,
+      "completed_transfers": 168605,
+      "rejected_transfers": 69919,
+      "failed_transfers": 0,
+      "dropped_transfers": 2831221,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 795.9177777777778,
+      "stddev": 3.823824276658829,
+      "cv": 0.004804295598642163,
+      "min": 791.71,
+      "max": 800.9633333333334
+    },
+    "latency_p50": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p95": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p99": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "latency_p999": { "mean": 5000000.0, "stddev": 0.0, "cv": 0.0, "min": 5000000.0, "max": 5000000.0 },
+    "total_completed": 507465,
+    "total_rejected": 208861,
+    "total_failed": 0,
+    "total_dropped": 8483676,
     "error_rate": 0.0
   },
   "warnings": [],
