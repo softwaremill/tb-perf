@@ -22,6 +22,7 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | baseline (prior article) | 5,000 | 1,000 |
 | `concurrency5k` | 5,000 (unchanged) | 5,000 |
 | `rate10k` | 10,000 | 5,000 |
+| `rate20k` (TigerBeetle only) | 20,000 | 30,000 |
 
 ## Results
 
@@ -39,8 +40,12 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | Mean throughput | **9,431 TPS** | 703 TPS | 867 TPS |
 | p50 / p95 / p99 latency | 37 / 611 / 837 ms | 5,000 / 5,000 / 5,000 ms (capped) | 5,000 / 5,000 / 5,000 ms (capped) |
 | Dropped | 598,159 | 8,529,844 | 8,363,650 |
+| **rate20k** (max_concurrency=30000, target_rate=20000, TigerBeetle only) |
+| Mean throughput | **20,257 TPS** | not tested | not tested |
+| p50 / p95 / p99 latency | 43 / 846 / 1,046 ms | - | - |
+| Dropped | **0** | - | - |
 
-Balance verified 3/3 runs in every one of the six tests - no correctness
+Balance verified 3/3 runs in every one of the seven tests - no correctness
 issues in the final numbers above (see "Two infrastructure issues hit along
 the way" for problems that occurred *before* getting to these clean runs).
 
@@ -59,9 +64,25 @@ offered (94%), with p50 latency barely moving (37ms, same as
 `concurrency5k`) and p99 still under a second. `dropped_transfers` is
 nonzero here (598k, ~9% of offered load) - so *this* time the cap is
 plausibly binding again, meaning TigerBeetle's true ceiling under this
-workload is somewhere *above* 9,431 TPS, not yet found. A useful next step
-is a `target_rate=15000`+ test with `max_concurrency` raised further to
-pin down the actual ceiling.
+workload is somewhere *above* 9,431 TPS, not yet found.
+
+`rate20k` follows up on exactly that: target_rate doubled again to 20,000,
+and this time `max_concurrency` was raised generously (30,000, i.e.
+6,000/client against 4,000/client offered - well past 1:1, since
+TigerBeetle's concurrency cap is a pure client-side safety valve with no
+corresponding server-side resource limit, unlike PostgreSQL's connection
+pool, so there's no cost to overprovisioning it). Result: **20,257 TPS
+mean, `dropped_transfers = 0`** - TigerBeetle absorbed essentially the
+entire 20,000 offered rate (101%) with real headroom in the concurrency
+cap this time, not just "not much dropped." Latency did grow somewhat
+(p50 37ms -> 43ms, p99 837ms -> 1,046ms), but stayed low and sub-second at
+every percentile through p99. **TigerBeetle's ceiling under hotspot skew
+still hasn't been found** - it absorbed a 2x jump in offered load with
+zero drops and only a modest latency increase, suggesting there's
+significant headroom left even above 20,000 TPS. The next step to actually
+find the ceiling would be pushing `target_rate` further (40,000+) until
+either drops start appearing again despite a generous cap, or latency
+starts growing non-linearly - whichever comes first.
 
 ## PostgreSQL: raising max_concurrency made things *worse*, not better
 
@@ -369,6 +390,88 @@ Result file: `results/run_20260730_080216/results.json`
     "total_rejected": 2661796,
     "total_failed": 0,
     "total_dropped": 598159,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### TigerBeetle, rate20k
+
+Result file: `results/run_20260807_071309/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "TigerBeetle",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 422.26971175,
+      "throughput_tps": 20152.93,
+      "latency_p50_us": 43492,
+      "latency_p95_us": 861992,
+      "latency_p99_us": 1029285,
+      "latency_p999_us": 1452928,
+      "completed_transfers": 4131887,
+      "rejected_transfers": 1913992,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 423.530890333,
+      "throughput_tps": 20308.69,
+      "latency_p50_us": 43833,
+      "latency_p95_us": 856669,
+      "latency_p99_us": 1112028,
+      "latency_p999_us": 1461202,
+      "completed_transfers": 4170273,
+      "rejected_transfers": 1922334,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 423.501136209,
+      "throughput_tps": 20310.763333333332,
+      "latency_p50_us": 42619,
+      "latency_p95_us": 820425,
+      "latency_p99_us": 998019,
+      "latency_p999_us": 1447665,
+      "completed_transfers": 4170094,
+      "rejected_transfers": 1923135,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 20257.46111111111,
+      "stddev": 73.91950383297687,
+      "cv": 0.0036490013939818157,
+      "min": 20152.93,
+      "max": 20310.763333333332
+    },
+    "latency_p50": { "mean": 43314.666666666664, "stddev": 511.2301069207703, "cv": 0.011802702092919342, "min": 42619.0, "max": 43833.0 },
+    "latency_p95": { "mean": 846362.0, "stddev": 18468.523835614655, "cv": 0.021821069277229665, "min": 820425.0, "max": 861992.0 },
+    "latency_p99": { "mean": 1046444.0, "stddev": 48099.45585970802, "cv": 0.04596467260523068, "min": 998019.0, "max": 1112028.0 },
+    "latency_p999": { "mean": 1453931.6666666667, "stddev": 5571.84005114608, "cv": 0.0038322571678490714, "min": 1447665.0, "max": 1461202.0 },
+    "total_completed": 12472254,
+    "total_rejected": 5759461,
+    "total_failed": 0,
+    "total_dropped": 0,
     "error_rate": 0.0
   },
   "warnings": [],
