@@ -178,6 +178,9 @@ compared to our first pass at this test.
 | **`rate10k`** (target_rate doubled to 10,000, same raised concurrency cap - how far can each system actually go?) |
 | Mean throughput | **9,431 TPS** | 703 TPS | 867 TPS |
 | Dropped requests | 598K (~9% of offered load - TigerBeetle's own ceiling is still higher than this) | 8.5M | 8.4M |
+| **`rate20k`** (target_rate doubled again to 20,000, TigerBeetle only - `rate10k` showed PostgreSQL flat regardless of offered rate, so we focused the next push on finding TigerBeetle's ceiling instead) |
+| Mean throughput | **20,257 TPS** | not tested | not tested |
+| Dropped requests | **0** (this time `max_concurrency` was raised generously enough - 30,000 - that the cap had real headroom, not just "not much dropped") | - | - |
 
 Error rate stayed at 0% and balance verified 3/3 across every one of these
 runs - the differences are entirely about performance, not correctness.
@@ -193,7 +196,7 @@ percentile including the median, but we don't have a precise number beyond
 for it. TigerBeetle's own latency, by contrast, stayed real and
 informative throughout:
 
-![TigerBeetle latency, concurrency5k vs rate10k](article-assets/latency_tigerbeetle_corrected_hotspot.png)
+![TigerBeetle latency, concurrency5k vs rate10k vs rate20k](article-assets/latency_tigerbeetle_corrected_hotspot.png)
 
 ## Headline takeaways
 
@@ -201,15 +204,26 @@ informative throughout:
   originally reported.** At matched offered load (`concurrency5k`),
   TigerBeetle is now **5.8x** PostgreSQL's best mode (atomic) under hotspot
   skew - not the 4.6x we measured before fixing our own concurrency cap.
-  Pushed further (`rate10k`, double the offered load), that gap widens to
-  roughly **10.9x**, because TigerBeetle keeps absorbing more load while
-  PostgreSQL's throughput barely moves.
+  Pushed to `rate10k` (double the offered load), that gap widens to
+  roughly **10.9x**. Against PostgreSQL's best observed number across this
+  entire investigation (878 TPS), TigerBeetle's `rate20k` result (20,257
+  TPS) is **~23x** higher - though we didn't re-test PostgreSQL at that
+  offered rate; `rate10k` already showed its throughput doesn't move with
+  `target_rate`, so we chose to spend that round of testing pinning down
+  TigerBeetle's ceiling instead.
+- **We still haven't found where TigerBeetle tops out.** Each time we
+  doubled the offered rate (5k -> 10k -> 20k) with `max_concurrency` raised
+  along with it, TigerBeetle kept absorbing essentially all of it - at
+  `rate20k`, `dropped_transfers` was exactly **zero**, meaning the
+  concurrency cap had real headroom this time, not just "not much
+  dropped." Latency grew, but stayed sub-second at p99 (1,046ms) even at
+  20,257 TPS. TigerBeetle's real ceiling under hotspot skew is still
+  somewhere above 20,000 TPS.
 - **The corrected numbers are more trustworthy, not just bigger.** Our
   original hotspot numbers for TigerBeetle were an artifact of an
   unmeasured concurrency cap, not TigerBeetle's real capacity. Once we
   tracked `dropped_transfers` and raised the cap, TigerBeetle's own ceiling
-  turned out to be *higher* than we'd been reporting - and even at 10,000
-  requests/sec offered, we still hadn't found where it tops out.
+  turned out to be *much higher* than we'd been reporting.
 - **PostgreSQL's ceiling under hotspot skew is architectural, not a tuning
   gap.** We tried raising `max_concurrency`, raising `target_rate`, and
   separately raising `connection_pool_size` (see below) - none of them
@@ -218,8 +232,8 @@ informative throughout:
   PostgreSQL's client-side knobs won't get you out of this regime; the
   bottleneck is row-lock contention on the hot accounts themselves.
 - **Correctness held everywhere**, across every test in this article and
-  the two rounds of testing that produced it. The differences are only in
-  performance.
+  the several rounds of testing that produced it. The differences are only
+  in performance.
 
 ## What we tried on PostgreSQL's side
 
@@ -253,9 +267,11 @@ several different tuning knobs all failed to move.
 
 A few natural follow-ups we haven't run yet: re-testing moderate skew with
 the corrected concurrency knobs (we'd expect a similar, if smaller, upward
-correction for TigerBeetle there); pushing `target_rate` well past 10,000 to
-actually find TigerBeetle's ceiling under hotspot skew; and testing
-`synchronous_commit` levels for PostgreSQL, since each row lock is currently
-held for the duration of a full cross-zone replication round trip - shrinking
-that hold time is the one lever in this whole investigation that would
-directly target the mechanism we now believe is the actual bottleneck.
+correction for TigerBeetle there); pushing `target_rate` well past 20,000
+(40,000+, with `max_concurrency` raised proportionally) to actually find
+TigerBeetle's ceiling under hotspot skew, since it hasn't shown any sign of
+slowing down yet; and testing `synchronous_commit` levels for PostgreSQL,
+since each row lock is currently held for the duration of a full cross-zone
+replication round trip - shrinking that hold time is the one lever in this
+whole investigation that would directly target the mechanism we now believe
+is the actual bottleneck.
