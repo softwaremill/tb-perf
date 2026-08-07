@@ -24,6 +24,7 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | `rate10k` | 10,000 | 5,000 |
 | `rate20k` (TigerBeetle only) | 20,000 | 30,000 |
 | `rate40k` (TigerBeetle only) | 40,000 | 100,000 |
+| `rate80k` (TigerBeetle only) | 80,000 | 200,000 |
 
 ## Results
 
@@ -49,8 +50,16 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | Mean throughput | **40,388 TPS** | not tested | not tested |
 | p50 / p95 / p99 latency | 73 / 948 / 1,312 ms | - | - |
 | Dropped | **0** | - | - |
+| **rate80k** (max_concurrency=200000, target_rate=80000, TigerBeetle only) |
+| Mean throughput | **81,171 TPS** | not tested | not tested |
+| p50 / p95 / p99* latency | **664** / **1,288** / 1,458* ms | - | - |
+| Dropped | **0** | - | - |
 
-Balance verified 3/3 runs in every one of the eight tests - no correctness
+\* p99 and p999 at `rate80k` (and p999 at `rate40k`) sit right against a
+histogram bucket-boundary artifact - see below, treat as lower bounds, not
+precise values.
+
+Balance verified 3/3 runs in every one of the nine tests - no correctness
 issues in the final numbers above (see "Two infrastructure issues hit along
 the way" for problems that occurred *before* getting to these clean runs).
 
@@ -93,29 +102,59 @@ show up as latency growth, not an artificial drop from an undersized cap).
 Result: **40,388 TPS mean, `dropped_transfers = 0`** - throughput again
 essentially matched the full offered rate (101%).
 
-Latency growth per doubling, by percentile, tells a more nuanced story
-than a single clean trend:
+Latency growth per doubling, by percentile:
 
 | Step | p50 | p95 | p99 | p999 |
 |---|---|---|---|---|
 | concurrency5k -> rate10k | +0% (37->37ms) | +27% (480->611ms) | +24% (676->837ms) | +9% (908->989ms) |
 | rate10k -> rate20k | +16% (37->43ms) | +39% (611->846ms) | +25% (837->1,046ms) | +47% (989->1,454ms) |
-| rate20k -> rate40k | **+70%** (43->73ms) | +12% (846->948ms) | +25% (1,046->1,312ms) | +2% (1,454->1,481ms) |
+| rate20k -> rate40k | +70% (43->73ms) | +12% (846->948ms) | +25% (1,046->1,312ms) | +2%\* (1,454->1,481ms) |
+| rate40k -> rate80k | **+810%** (73->664ms) | **+36%** (948->1,288ms) | +11%\* (1,312->1,458ms) | +1%\* (1,481->1,496ms) |
 
-p50 growth accelerated sharply on the last step (+70%, vs +16% the step
-before) - the first clear signal in this sweep that something is starting
-to give under load. p99 growth, by contrast, has stayed remarkably steady
-at ~24-25% every single doubling, and p999 actually flattened almost
-completely on this last step (+2%, after jumping 47% the step before) -
-possibly bumping against a separate, roughly fixed tail ceiling (plausibly
-replication/consensus round-trip timing under extreme contention) that
-doesn't move much regardless of load, while the bulk of the distribution
-(p50) keeps climbing. **Still no confirmed throughput ceiling** -
-`dropped_transfers` was zero and throughput tracked the offered rate
-through this 2x jump just as cleanly as the last one - but the
-accelerating p50 growth is the first data point in this whole
-investigation suggesting we may be getting close. Worth pushing further
-(80,000+) to see whether p50 growth keeps accelerating or this was noise.
+\* **Correction:** the original version of this doc read the flattening
+p999 growth at `rate40k` (+2%) as "bumping against a separate, roughly
+fixed tail ceiling." That interpretation was wrong. `client/src/metrics.rs`
+bounds the exported latency histogram's buckets up to `1,500,000us` (1.5s)
+as its second-highest boundary - and both `rate40k`'s p999 (1,481ms) and
+`rate80k`'s p999 (1,496ms), plus now `rate80k`'s p99 too (1,458ms), are
+sitting within a few milliseconds of that exact boundary. Worse, the
+run-to-run coefficient of variation on `rate80k`'s p99/p999 is
+essentially zero (0.03% and 0.008% - all three runs landing within a few
+hundred *microseconds* of each other), which is the signature of a
+value being capped by a bucket edge, not organically converging. **We
+don't have a trustworthy number for real tail latency beyond ~1.5s at
+either `rate40k` or `rate80k`** - it could be exactly what's shown, or it
+could be much worse; the histogram simply can't tell us. This is the same
+category of measurement gap as PostgreSQL's 5-second histogram cap found
+earlier in this sweep, just less obvious since 1.5s isn't a suspiciously
+round number the way 5,000ms is.
+
+The trustworthy signal is p50 and p95, since neither sits anywhere near a
+bucket boundary at any step. And on the `rate40k -> rate80k` step, that
+signal is dramatic: **p50 exploded 810% (73ms -> 664ms)**, and p95 grew
+36% (948ms -> 1,288ms) - both far larger jumps than any previous doubling.
+Throughput still tracked the offered rate almost exactly (81,171 TPS
+against 80,000 offered, 101%) with `dropped_transfers = 0` - so nothing in
+the coordinator's own pass/fail thresholds (error rate, drops) would flag
+this run as degraded. But a median latency response time increasing
+9x while throughput holds steady is a classic saturation signature: the
+system is very likely queueing a large and growing backlog internally,
+sustaining the offered rate only because `max_concurrency=200,000` gives
+it enough client-side buffer to keep accepting new requests while it works
+through that backlog. **This is the strongest signal in the whole sweep
+that we are at or very near TigerBeetle's real practical ceiling** under
+this specific workload (100k accounts, heavy hotspot skew, 3-node cluster
+on `n2-highmem-4`) - even though throughput itself never showed a wall.
+
+We stopped the sweep here rather than push to 160,000: with median latency
+already at 664ms and queueing clearly dominant, continuing to push
+`target_rate` would mostly be measuring how large a backlog
+`max_concurrency` allows to build up, not finding a materially different
+answer about the ceiling. Anyone continuing this investigation should
+first widen the histogram bucket boundaries above 1.5s in
+`client/src/metrics.rs` to get a trustworthy read on the tail before
+pushing further - otherwise the same bucket-artifact problem will just
+recur at whatever the next boundary happens to be.
 
 ## PostgreSQL: raising max_concurrency made things *worse*, not better
 
@@ -596,6 +635,88 @@ Result file: `results/run_20260807_082727/results.json`
     "latency_p999": { "mean": 1481162.3333333333, "stddev": 1108.0220615533287, "cv": 0.00074807604583067, "min": 1480203.0, "max": 1482715.0 },
     "total_completed": 24824699,
     "total_rejected": 11524242,
+    "total_failed": 0,
+    "total_dropped": 0,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### TigerBeetle, rate80k
+
+Result file: `results/run_20260807_091056/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "TigerBeetle",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 422.956180042,
+      "throughput_tps": 80669.69666666667,
+      "latency_p50_us": 670047,
+      "latency_p95_us": 1288070,
+      "latency_p99_us": 1457614,
+      "latency_p999_us": 1495761,
+      "completed_transfers": 16519358,
+      "rejected_transfers": 7681551,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 423.295465584,
+      "throughput_tps": 81445.72,
+      "latency_p50_us": 654291,
+      "latency_p95_us": 1289401,
+      "latency_p99_us": 1458046,
+      "latency_p999_us": 1495991,
+      "completed_transfers": 16643440,
+      "rejected_transfers": 7790276,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 423.429300959,
+      "throughput_tps": 81398.06,
+      "latency_p50_us": 668093,
+      "latency_p95_us": 1285060,
+      "latency_p99_us": 1457012,
+      "latency_p999_us": 1495701,
+      "completed_transfers": 16648025,
+      "rejected_transfers": 7771393,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 81171.1588888889,
+      "stddev": 355.1207673801829,
+      "cv": 0.004374962391091272,
+      "min": 80669.69666666667,
+      "max": 81445.72
+    },
+    "latency_p50": { "mean": 664143.6666666666, "stddev": 7012.408494154408, "cv": 0.010558571655662466, "min": 654291.0, "max": 670047.0 },
+    "latency_p95": { "mean": 1287510.3333333333, "stddev": 1815.8543137842553, "cv": 0.0014103609631489732, "min": 1285060.0, "max": 1289401.0 },
+    "latency_p99": { "mean": 1457557.3333333333, "stddev": 424.02620464096583, "cv": 0.00029091562640026455, "min": 1457012.0, "max": 1458046.0 },
+    "latency_p999": { "mean": 1495817.6666666667, "stddev": 124.98888839501782, "cv": 0.00008355890639635745, "min": 1495701.0, "max": 1495991.0 },
+    "total_completed": 49810823,
+    "total_rejected": 23243220,
     "total_failed": 0,
     "total_dropped": 0,
     "error_rate": 0.0

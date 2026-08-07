@@ -11,10 +11,11 @@ OUT_DIR = "article-assets"
 
 # --- Chart 1: throughput, corrected hotspot numbers -------------------------
 groups = ["concurrency5k\n(target=5,000)", "rate10k\n(target=10,000)",
-          "rate20k\n(target=20,000)", "rate40k\n(target=40,000)"]
-tigerbeetle = [5060, 9431, 20257, 40388]
-pg_standard = [683, 703]  # not tested at rate20k/rate40k
-pg_atomic = [878, 867]  # not tested at rate20k/rate40k
+          "rate20k\n(target=20,000)", "rate40k\n(target=40,000)",
+          "rate80k\n(target=80,000)"]
+tigerbeetle = [5060, 9431, 20257, 40388, 81171]
+pg_standard = [683, 703]  # not tested past rate10k
+pg_atomic = [878, 867]  # not tested past rate10k
 
 x = np.arange(len(groups))
 width = 0.25
@@ -30,7 +31,7 @@ ax.set_title("TigerBeetle vs. PostgreSQL — hotspot skew, corrected knobs", pad
 ax.set_xticks(x)
 ax.set_xticklabels(groups)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=1, frameon=False)
-ax.set_ylim(1, 1e5)
+ax.set_ylim(1, 2e5)
 
 for bars in (b1, b2, b3):
     for bar in bars:
@@ -38,7 +39,7 @@ for bars in (b1, b2, b3):
         ax.annotate(f"{int(h):,}", (bar.get_x() + bar.get_width() / 2, h),
                     ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-for gx in (x[2], x[3]):
+for gx in (x[2], x[3], x[4]):
     ax.annotate("PostgreSQL\nnot tested", (gx, 1.0), ha="center", va="bottom",
                 fontsize=8, color="#666666", xytext=(gx, 3))
 
@@ -53,33 +54,41 @@ plt.close(fig)
 # "at least 5s" but not known precisely from this data - charting it as an
 # exact bar would overstate our own measurement precision.
 percentiles = ["p50", "p95", "p99", "p999"]
-c5k = [37, 480, 676, 908]
-r10k = [37, 611, 837, 989]
-r20k = [43, 846, 1046, 1454]
-r40k = [73, 948, 1312, 1481]
+# CAPPED = value sits within ~50ms of the client's 1,500,000us histogram
+# bucket boundary (client/src/metrics.rs) - treat as a lower bound, not a
+# precise measurement. Marked with a hatch pattern below.
+series = [
+    ("concurrency5k (target=5,000)", [37, 480, 676, 908], [False, False, False, False], "#e8743b"),
+    ("rate10k (target=10,000)", [37, 611, 837, 989], [False, False, False, False], "#f4a261"),
+    ("rate20k (target=20,000)", [43, 846, 1046, 1454], [False, False, False, False], "#f9c784"),
+    ("rate40k (target=40,000)", [73, 948, 1312, 1481], [False, False, False, True], "#c9a876"),
+    ("rate80k (target=80,000)", [664, 1288, 1458, 1496], [False, False, True, True], "#8c6d46"),
+]
 
-x = np.arange(len(percentiles))
-width = 0.2
+x = np.arange(len(percentiles)) * 1.4
+width = 0.16
+offsets = np.linspace(-2 * width, 2 * width, len(series))
 
-fig, ax = plt.subplots(figsize=(9, 5))
-b1 = ax.bar(x - 1.5 * width, c5k, width, label="concurrency5k (target=5,000)", color="#e8743b")
-b2 = ax.bar(x - 0.5 * width, r10k, width, label="rate10k (target=10,000)", color="#f4a261")
-b3 = ax.bar(x + 0.5 * width, r20k, width, label="rate20k (target=20,000)", color="#f9c784")
-b4 = ax.bar(x + 1.5 * width, r40k, width, label="rate40k (target=40,000)", color="#c9a876")
+fig, ax = plt.subplots(figsize=(11, 6))
+for (label, values, capped, color), offset in zip(series, offsets):
+    bars = ax.bar(x + offset, values, width, label=label, color=color)
+    for bar, h, is_capped in zip(bars, values, capped):
+        if is_capped:
+            bar.set_hatch("////")
+            bar.set_edgecolor("#333333")
+        ax.annotate(f"{h}{'*' if is_capped else ''}", (bar.get_x() + bar.get_width() / 2, h),
+                    ha="center", va="bottom", fontsize=7.5, fontweight="bold", rotation=90 if is_capped else 0)
 
 ax.set_ylabel("Latency (milliseconds)")
-ax.set_title("TigerBeetle latency under hotspot skew — corrected knobs")
+ax.set_title("TigerBeetle latency under hotspot skew — corrected knobs", pad=15)
 ax.set_xticks(x)
 ax.set_xticklabels(percentiles)
-ax.legend()
+ax.set_ylim(0, 1750)
+ax.legend(fontsize=8, loc="upper left")
+fig.text(0.5, 0.01, "* hatched/starred bars sit against a histogram bucket boundary (~1.5s) - lower bound only, not a precise value",
+          ha="center", va="bottom", fontsize=8, color="#555555")
 
-for bars in (b1, b2, b3, b4):
-    for bar in bars:
-        h = bar.get_height()
-        ax.annotate(f"{int(h)}", (bar.get_x() + bar.get_width() / 2, h),
-                    ha="center", va="bottom", fontsize=8, fontweight="bold")
-
-fig.tight_layout()
+fig.tight_layout(rect=(0, 0.04, 1, 1))
 fig.savefig(f"{OUT_DIR}/latency_tigerbeetle_corrected_hotspot.png", dpi=150)
 plt.close(fig)
 
