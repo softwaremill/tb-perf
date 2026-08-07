@@ -120,9 +120,21 @@ impl WorkloadMetrics {
                 1_000_000.0,
                 // 1-5s (for high queuing delays under load)
                 1_500_000.0,
+                1_750_000.0,
                 2_000_000.0,
+                2_500_000.0,
                 3_000_000.0,
+                4_000_000.0,
                 5_000_000.0,
+                // 5-20s (added for the rate160k probe - previous bucket set
+                // topped out at 5s, which was too coarse to tell a real
+                // saturation ceiling apart from a bucket-boundary artifact
+                // at rate40k/rate80k; see hotspot-knob-sweep-results.md)
+                6_000_000.0,
+                8_000_000.0,
+                10_000_000.0,
+                15_000_000.0,
+                20_000_000.0,
             ])
             .build();
 
