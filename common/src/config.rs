@@ -505,6 +505,7 @@ mod tests {
         let files = [
             "config.cloud-tigerbeetle-hotspot-concurrency5k.toml",
             "config.cloud-tigerbeetle-hotspot-rate10k.toml",
+            "config.cloud-tigerbeetle-hotspot-rate20k.toml",
             "config.cloud-postgresql-hotspot-concurrency5k.toml",
             "config.cloud-postgresql-hotspot-rate10k.toml",
             "config.cloud-postgresql-atomic-hotspot-concurrency5k.toml",
