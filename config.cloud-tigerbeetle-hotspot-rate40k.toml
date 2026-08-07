@@ -1,0 +1,53 @@
+# Cloud TigerBeetle hotspot-contention test configuration - rate sweep,
+# pushed further still. Same as config.cloud-tigerbeetle-hotspot-rate20k.toml,
+# but target_rate doubled again (20,000 -> 40,000) to keep probing for
+# TigerBeetle's real ceiling under hotspot skew - rate20k achieved 20,257
+# TPS with dropped_transfers=0, meaning the ceiling is still somewhere
+# above 20,000 (see hotspot-knob-sweep-results.md). max_concurrency raised
+# to 100,000 (20,000/client vs 8,000/client offered - 2.5x headroom) since
+# latency could start growing non-linearly as we approach the real ceiling,
+# and we want that signal to show up as latency growth, not as an
+# artificial drop from an undersized cap. TigerBeetle's concurrency cap is
+# a pure client-side safety valve with no corresponding server-side
+# resource limit (unlike PostgreSQL's connection pool), so there's no cost
+# to being generous here.
+
+[workload]
+test_mode = "fixed_rate"
+target_rate = 40000  # Total requests/sec across all 5 client instances
+max_concurrency = 100000
+num_accounts = 100000
+zipfian_exponent = 2.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 120
+test_duration_secs = 300
+
+[database]
+type = "tigerbeetle"
+
+[tigerbeetle]
+cluster_addresses = ["tb-node-1:3000", "tb-node-2:3000", "tb-node-3:3000"]
+
+[deployment]
+type = "cloud"
+num_db_nodes = 3
+num_client_nodes = 5
+gcp_project = "tigerbettle-sandbox"
+gcp_region = "europe-central2"
+db_machine_type = "n2-highmem-4"
+client_machine_type = "n2-standard-2"
+measure_network_latency = true
+
+[coordinator]
+test_runs = 3
+max_variance_threshold = 0.10
+max_error_rate = 0.05
+metrics_export_path = "./results"
+keep_grafana_running = true
+
+[monitoring]
+grafana_port = 3000
+prometheus_port = 9090
+otel_collector_port = 4317
