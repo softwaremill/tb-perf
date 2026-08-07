@@ -10,18 +10,19 @@ import numpy as np
 OUT_DIR = "article-assets"
 
 # --- Chart 1: throughput, corrected hotspot numbers -------------------------
-groups = ["concurrency5k\n(target=5,000)", "rate10k\n(target=10,000)", "rate20k\n(target=20,000)"]
-tigerbeetle = [5060, 9431, 20257]
-pg_standard = [683, 703, None]  # not tested at rate20k
-pg_atomic = [878, 867, None]  # not tested at rate20k
+groups = ["concurrency5k\n(target=5,000)", "rate10k\n(target=10,000)",
+          "rate20k\n(target=20,000)", "rate40k\n(target=40,000)"]
+tigerbeetle = [5060, 9431, 20257, 40388]
+pg_standard = [683, 703]  # not tested at rate20k/rate40k
+pg_atomic = [878, 867]  # not tested at rate20k/rate40k
 
 x = np.arange(len(groups))
 width = 0.25
 
-fig, ax = plt.subplots(figsize=(9, 5.5))
+fig, ax = plt.subplots(figsize=(10, 5.5))
 b1 = ax.bar(x - width, tigerbeetle, width, label="TigerBeetle", color="#e8743b")
-b2 = ax.bar(x[:2], pg_standard[:2], width, label="PostgreSQL Standard (FOR UPDATE)", color="#2f6690")
-b3 = ax.bar(x[:2] + width, pg_atomic[:2], width, label="PostgreSQL Atomic", color="#5fa8d3")
+b2 = ax.bar(x[:2], pg_standard, width, label="PostgreSQL Standard (FOR UPDATE)", color="#2f6690")
+b3 = ax.bar(x[:2] + width, pg_atomic, width, label="PostgreSQL Atomic", color="#5fa8d3")
 
 ax.set_yscale("log")
 ax.set_ylabel("Throughput (transfers / second, log scale)")
@@ -29,7 +30,7 @@ ax.set_title("TigerBeetle vs. PostgreSQL — hotspot skew, corrected knobs", pad
 ax.set_xticks(x)
 ax.set_xticklabels(groups)
 ax.legend(loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=1, frameon=False)
-ax.set_ylim(1, 5e4)
+ax.set_ylim(1, 1e5)
 
 for bars in (b1, b2, b3):
     for bar in bars:
@@ -37,8 +38,9 @@ for bars in (b1, b2, b3):
         ax.annotate(f"{int(h):,}", (bar.get_x() + bar.get_width() / 2, h),
                     ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-ax.annotate("not tested\nat rate20k", (x[2], 1.0), ha="center", va="bottom",
-            fontsize=8, color="#666666", xytext=(x[2] + width / 2, 3))
+for gx in (x[2], x[3]):
+    ax.annotate("PostgreSQL\nnot tested", (gx, 1.0), ha="center", va="bottom",
+                fontsize=8, color="#666666", xytext=(gx, 3))
 
 fig.tight_layout()
 fig.savefig(f"{OUT_DIR}/throughput_corrected_hotspot.png", dpi=150)
@@ -54,14 +56,16 @@ percentiles = ["p50", "p95", "p99", "p999"]
 c5k = [37, 480, 676, 908]
 r10k = [37, 611, 837, 989]
 r20k = [43, 846, 1046, 1454]
+r40k = [73, 948, 1312, 1481]
 
 x = np.arange(len(percentiles))
-width = 0.25
+width = 0.2
 
-fig, ax = plt.subplots(figsize=(8, 5))
-b1 = ax.bar(x - width, c5k, width, label="concurrency5k (target=5,000)", color="#e8743b")
-b2 = ax.bar(x, r10k, width, label="rate10k (target=10,000)", color="#f4a261")
-b3 = ax.bar(x + width, r20k, width, label="rate20k (target=20,000)", color="#f9c784")
+fig, ax = plt.subplots(figsize=(9, 5))
+b1 = ax.bar(x - 1.5 * width, c5k, width, label="concurrency5k (target=5,000)", color="#e8743b")
+b2 = ax.bar(x - 0.5 * width, r10k, width, label="rate10k (target=10,000)", color="#f4a261")
+b3 = ax.bar(x + 0.5 * width, r20k, width, label="rate20k (target=20,000)", color="#f9c784")
+b4 = ax.bar(x + 1.5 * width, r40k, width, label="rate40k (target=40,000)", color="#c9a876")
 
 ax.set_ylabel("Latency (milliseconds)")
 ax.set_title("TigerBeetle latency under hotspot skew — corrected knobs")
@@ -69,11 +73,11 @@ ax.set_xticks(x)
 ax.set_xticklabels(percentiles)
 ax.legend()
 
-for bars in (b1, b2, b3):
+for bars in (b1, b2, b3, b4):
     for bar in bars:
         h = bar.get_height()
         ax.annotate(f"{int(h)}", (bar.get_x() + bar.get_width() / 2, h),
-                    ha="center", va="bottom", fontsize=9, fontweight="bold")
+                    ha="center", va="bottom", fontsize=8, fontweight="bold")
 
 fig.tight_layout()
 fig.savefig(f"{OUT_DIR}/latency_tigerbeetle_corrected_hotspot.png", dpi=150)

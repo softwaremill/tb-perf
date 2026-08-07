@@ -23,6 +23,7 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | `concurrency5k` | 5,000 (unchanged) | 5,000 |
 | `rate10k` | 10,000 | 5,000 |
 | `rate20k` (TigerBeetle only) | 20,000 | 30,000 |
+| `rate40k` (TigerBeetle only) | 40,000 | 100,000 |
 
 ## Results
 
@@ -44,8 +45,12 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | Mean throughput | **20,257 TPS** | not tested | not tested |
 | p50 / p95 / p99 latency | 43 / 846 / 1,046 ms | - | - |
 | Dropped | **0** | - | - |
+| **rate40k** (max_concurrency=100000, target_rate=40000, TigerBeetle only) |
+| Mean throughput | **40,388 TPS** | not tested | not tested |
+| p50 / p95 / p99 latency | 73 / 948 / 1,312 ms | - | - |
+| Dropped | **0** | - | - |
 
-Balance verified 3/3 runs in every one of the seven tests - no correctness
+Balance verified 3/3 runs in every one of the eight tests - no correctness
 issues in the final numbers above (see "Two infrastructure issues hit along
 the way" for problems that occurred *before* getting to these clean runs).
 
@@ -79,10 +84,38 @@ cap this time, not just "not much dropped." Latency did grow somewhat
 every percentile through p99. **TigerBeetle's ceiling under hotspot skew
 still hasn't been found** - it absorbed a 2x jump in offered load with
 zero drops and only a modest latency increase, suggesting there's
-significant headroom left even above 20,000 TPS. The next step to actually
-find the ceiling would be pushing `target_rate` further (40,000+) until
-either drops start appearing again despite a generous cap, or latency
-starts growing non-linearly - whichever comes first.
+significant headroom left even above 20,000 TPS.
+
+`rate40k` pushes further still: target_rate doubled again to 40,000, with
+`max_concurrency` raised to 100,000 (20,000/client against 8,000/client
+offered, 2.5x headroom - generous on purpose, since a real ceiling should
+show up as latency growth, not an artificial drop from an undersized cap).
+Result: **40,388 TPS mean, `dropped_transfers = 0`** - throughput again
+essentially matched the full offered rate (101%).
+
+Latency growth per doubling, by percentile, tells a more nuanced story
+than a single clean trend:
+
+| Step | p50 | p95 | p99 | p999 |
+|---|---|---|---|---|
+| concurrency5k -> rate10k | +0% (37->37ms) | +27% (480->611ms) | +24% (676->837ms) | +9% (908->989ms) |
+| rate10k -> rate20k | +16% (37->43ms) | +39% (611->846ms) | +25% (837->1,046ms) | +47% (989->1,454ms) |
+| rate20k -> rate40k | **+70%** (43->73ms) | +12% (846->948ms) | +25% (1,046->1,312ms) | +2% (1,454->1,481ms) |
+
+p50 growth accelerated sharply on the last step (+70%, vs +16% the step
+before) - the first clear signal in this sweep that something is starting
+to give under load. p99 growth, by contrast, has stayed remarkably steady
+at ~24-25% every single doubling, and p999 actually flattened almost
+completely on this last step (+2%, after jumping 47% the step before) -
+possibly bumping against a separate, roughly fixed tail ceiling (plausibly
+replication/consensus round-trip timing under extreme contention) that
+doesn't move much regardless of load, while the bulk of the distribution
+(p50) keeps climbing. **Still no confirmed throughput ceiling** -
+`dropped_transfers` was zero and throughput tracked the offered rate
+through this 2x jump just as cleanly as the last one - but the
+accelerating p50 growth is the first data point in this whole
+investigation suggesting we may be getting close. Worth pushing further
+(80,000+) to see whether p50 growth keeps accelerating or this was noise.
 
 ## PostgreSQL: raising max_concurrency made things *worse*, not better
 
@@ -227,6 +260,17 @@ connections) and the pool=20 concurrency5k/rate10k configs (same pool
 size, only the client-side cap changed) but not for pool=50 (5 x 50 =
 250). Fixed by raising it to 300 in both places (primary and standby
 values must match or the standby refuses to start).
+
+**A transient GCP-side authentication error hit `rate40k`'s first
+attempt** - not related to load at all. Run 1 completed cleanly (~40,104
+TPS, 0 drops - a valid data point on its own, though not used in the final
+numbers above since the invocation as a whole didn't finish), but the
+cluster-reconfiguration step before run 2 failed with `scp ... ERROR:
+(gcloud.compute.scp) Could not fetch resource: - Authentication backend
+unavailable` while copying the TigerBeetle setup script to a DB node. This
+looks like a one-off GCP IAM/OS Login hiccup rather than anything caused
+by the test itself - a full retry of the whole invocation succeeded
+cleanly on the first attempt (3/3 runs, no further errors).
 
 ## Raw results
 
@@ -470,6 +514,88 @@ Result file: `results/run_20260807_071309/results.json`
     "latency_p999": { "mean": 1453931.6666666667, "stddev": 5571.84005114608, "cv": 0.0038322571678490714, "min": 1447665.0, "max": 1461202.0 },
     "total_completed": 12472254,
     "total_rejected": 5759461,
+    "total_failed": 0,
+    "total_dropped": 0,
+    "error_rate": 0.0
+  },
+  "warnings": [],
+  "errors": []
+}
+```
+
+### TigerBeetle, rate40k
+
+Result file: `results/run_20260807_082727/results.json`
+
+```json
+{
+  "config_summary": {
+    "database_type": "TigerBeetle",
+    "test_mode": "fixed_rate",
+    "num_accounts": 100000,
+    "initial_balance": 1000000,
+    "warmup_duration_secs": 120,
+    "test_duration_secs": 300,
+    "num_runs": 3
+  },
+  "runs": [
+    {
+      "run_id": 1,
+      "duration_secs": 422.282383416,
+      "throughput_tps": 39722.51,
+      "latency_p50_us": 74189,
+      "latency_p95_us": 946028,
+      "latency_p99_us": 1305695,
+      "latency_p999_us": 1480569,
+      "completed_transfers": 8150380,
+      "rejected_transfers": 3766373,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 2,
+      "duration_secs": 423.131516666,
+      "throughput_tps": 40947.43,
+      "latency_p50_us": 72542,
+      "latency_p95_us": 954033,
+      "latency_p99_us": 1327150,
+      "latency_p999_us": 1482715,
+      "completed_transfers": 8375972,
+      "rejected_transfers": 3908257,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    },
+    {
+      "run_id": 3,
+      "duration_secs": 422.618092708,
+      "throughput_tps": 40493.19666666666,
+      "latency_p50_us": 73286,
+      "latency_p95_us": 943178,
+      "latency_p99_us": 1302032,
+      "latency_p999_us": 1480203,
+      "completed_transfers": 8298347,
+      "rejected_transfers": 3849612,
+      "failed_transfers": 0,
+      "dropped_transfers": 0,
+      "balance_verified": true
+    }
+  ],
+  "aggregate": {
+    "throughput": {
+      "mean": 40387.71222222222,
+      "stddev": 505.6035849126687,
+      "cv": 0.012518747834260203,
+      "min": 39722.51,
+      "max": 40947.43
+    },
+    "latency_p50": { "mean": 73339.0, "stddev": 673.4285411237038, "cv": 0.009182406920243033, "min": 72542.0, "max": 74189.0 },
+    "latency_p95": { "mean": 947746.3333333334, "stddev": 4595.0885615936595, "cv": 0.004848437181953743, "min": 943178.0, "max": 954033.0 },
+    "latency_p99": { "mean": 1311625.6666666667, "stddev": 11078.751022665967, "cv": 0.008446579923082195, "min": 1302032.0, "max": 1327150.0 },
+    "latency_p999": { "mean": 1481162.3333333333, "stddev": 1108.0220615533287, "cv": 0.00074807604583067, "min": 1480203.0, "max": 1482715.0 },
+    "total_completed": 24824699,
+    "total_rejected": 11524242,
     "total_failed": 0,
     "total_dropped": 0,
     "error_rate": 0.0
