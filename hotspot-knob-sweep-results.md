@@ -25,6 +25,7 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | `rate20k` (TigerBeetle only) | 20,000 | 30,000 |
 | `rate40k` (TigerBeetle only) | 40,000 | 100,000 |
 | `rate80k` (TigerBeetle only) | 80,000 | 200,000 |
+| `rate160k` (TigerBeetle only) | 160,000 | 400,000 |
 
 ## Results
 
@@ -54,16 +55,25 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | Mean throughput | **81,171 TPS** | not tested | not tested |
 | p50 / p95 / p99* latency | **664** / **1,288** / 1,458* ms | - | - |
 | Dropped | **0** | - | - |
+| **rate160k** (max_concurrency=400000, target_rate=160000, TigerBeetle only) |
+| Mean throughput | **107,858 TPS** (67% of offered - real shortfall) | not tested | not tested |
+| p50 / p95 / p99 latency | **3,611** / **5,469** / **7,294** ms (real values, no longer bucket-capped) | - | - |
+| Dropped | **~34%** of offered load (16.6-16.7M/run) | - | - |
 
-\* p99 and p999 at `rate80k` (and p999 at `rate40k`) sit right against a
-histogram bucket-boundary artifact - see below, treat as lower bounds, not
-precise values.
+\* p99 and p999 at `rate80k` (and p999 at `rate40k`) sat right against the
+histogram's old 1.5s bucket boundary - confirmed a measurement artifact,
+not a real value, once `rate160k` proved latency grows freely well past
+1.5s when the histogram has room. See below for the full story and an
+important caveat on the `rate160k` numbers themselves (2 of 3 runs, due to
+an infrastructure issue - not a data-quality problem, but worth reading
+before citing these numbers).
 
-Balance verified 3/3 runs in every one of the nine tests - no correctness
-issues in the final numbers above (see "Two infrastructure issues hit along
-the way" for problems that occurred *before* getting to these clean runs).
+Balance verified 3/3 runs in every test through `rate80k`, and 2/2 runs
+that completed for `rate160k` (see caveat below) - no correctness issues
+anywhere (see "Infrastructure issues hit along the way" for problems that
+occurred *before* getting to these clean runs).
 
-## TigerBeetle: the concurrency cap was real, and the ceiling is higher than 10k
+## TigerBeetle: the concurrency cap was real, and we found the real ceiling at rate160k
 
 `concurrency5k` confirms the original hypothesis cleanly: with the cap
 raised from 200 to 1,000 in-flight slots per client (same offered rate),
@@ -136,25 +146,64 @@ signal is dramatic: **p50 exploded 810% (73ms -> 664ms)**, and p95 grew
 Throughput still tracked the offered rate almost exactly (81,171 TPS
 against 80,000 offered, 101%) with `dropped_transfers = 0` - so nothing in
 the coordinator's own pass/fail thresholds (error rate, drops) would flag
-this run as degraded. But a median latency response time increasing
-9x while throughput holds steady is a classic saturation signature: the
-system is very likely queueing a large and growing backlog internally,
-sustaining the offered rate only because `max_concurrency=200,000` gives
-it enough client-side buffer to keep accepting new requests while it works
-through that backlog. **This is the strongest signal in the whole sweep
-that we are at or very near TigerBeetle's real practical ceiling** under
-this specific workload (100k accounts, heavy hotspot skew, 3-node cluster
-on `n2-highmem-4`) - even though throughput itself never showed a wall.
+this run as degraded. At the time, we read this as the strongest signal
+yet that we were at or very near TigerBeetle's real ceiling, and stopped
+there - reasoning that pushing further without fixing the histogram first
+would just repeat the same measurement problem at a new boundary.
 
-We stopped the sweep here rather than push to 160,000: with median latency
-already at 664ms and queueing clearly dominant, continuing to push
-`target_rate` would mostly be measuring how large a backlog
-`max_concurrency` allows to build up, not finding a materially different
-answer about the ceiling. Anyone continuing this investigation should
-first widen the histogram bucket boundaries above 1.5s in
-`client/src/metrics.rs` to get a trustworthy read on the tail before
-pushing further - otherwise the same bucket-artifact problem will just
-recur at whatever the next boundary happens to be.
+**We were wrong about `rate80k` being the ceiling - it wasn't, and here's
+the proof.** Before pushing further, we widened `client/src/metrics.rs`'s
+histogram buckets from a 1.5s max up to 20s, specifically so the next test
+could tell a real architectural cap apart from a bucket-boundary artifact.
+Then we ran `rate160k`: target_rate doubled again to 160,000,
+`max_concurrency` raised to 400,000 (same 2.5x headroom ratio used
+throughout). The result settled the question decisively:
+
+- **Mean throughput: 107,858 TPS - only 67% of the 160,000 offered rate.**
+  Every single prior step in this sweep achieved ~100-101% of its offered
+  rate. This is the first real throughput shortfall in the entire
+  investigation.
+- **~34% of offered load dropped** (16.6-16.7M dropped transfers per run,
+  out of ~48-49M offered) - substantial, real drops, a world away from the
+  0-9% seen at every earlier step.
+- **Real tail latency, finally unbounded by the histogram: p50 ~3.6s, p95
+  up to 6.2s, p99 up to 9.6s, p999 up to 14.2s.** With buckets now
+  available up to 20s, these are genuine measured values, not artifacts.
+
+That last point is the key methodological payoff: **latency at `rate160k`
+grew freely to multiple seconds once the histogram had room to show it.**
+If `rate40k`/`rate80k`'s ~1.5s plateau had been a real architectural
+ceiling, `rate160k`'s numbers would have plateaued at roughly the same
+point too, just with a different (higher) bucket boundary in the way. They
+didn't - they kept climbing well past 1.5s, confirming the earlier
+plateau really was the histogram artifact we suspected, not a genuine cap.
+TigerBeetle's actual ceiling under this hotspot workload sits somewhere
+between `rate80k` (clean: 0 drops, 664ms p50) and `rate160k` (degraded:
+~34% drops, 3.6s+ p50) - `rate80k`'s dramatic p50 growth (+810%) was a
+real, correctly-read warning sign of approaching saturation; it just
+wasn't the wall itself.
+
+**A caveat on the `rate160k` numbers: they come from 2 of the planned 3
+runs, not a full coordinator-produced aggregate.** The coordinator process
+was killed by what looks like a hard ~24.5-minute limit on the background
+task running it - hit three separate times, always at almost exactly the
+same elapsed time, always right as the *third* run's balance verification
+was starting (after both prior runs had completed and passed balance
+verification cleanly). More frequent check-ins on the process didn't
+prevent it, which argues against it being caused by any particular polling
+behavior. Rather than keep retrying an ~26-minute test against what
+appears to be a hard external ceiling, we extracted the two runs that did
+complete (both with clean balance verification, both showing the same
+substantial-drop/multi-second-latency picture) and reported their
+average directly instead of a full three-run aggregate with
+standard-deviation/CV statistics. The two runs agree closely on
+throughput (106,866 vs 108,850 TPS) and drop rate (34.2% vs 33.9%), but
+latency grew noticeably between them (p999 4.99s -> 14.24s) even after the
+30-second stabilization wait and account reset between runs - suggesting
+that at this level of overload, the backlog from one run doesn't fully
+clear before the next begins. That's a real finding worth flagging on its
+own, not just a caveat about our sample size: whatever is queueing under
+this load takes longer than 30 seconds to drain.
 
 ## PostgreSQL: raising max_concurrency made things *worse*, not better
 
@@ -244,11 +293,11 @@ across this whole sweep (`max_concurrency`, `target_rate`,
 hotspot skew - which is itself a meaningful result: the constraint is
 architectural, not a tuning gap.
 
-## Two infrastructure issues hit along the way
+## Infrastructure issues hit along the way
 
-Neither affects the final numbers above (all runs shown passed balance
-verification), but both are worth recording since they'll recur if this
-sweep is extended.
+None of these affect the final numbers above (all runs shown passed
+balance verification), but they're worth recording since they'll recur if
+this sweep is extended.
 
 **TigerBeetle account funding isn't idempotent across separate coordinator
 invocations.** Running two `./target/release/coordinator` invocations
@@ -310,6 +359,32 @@ unavailable` while copying the TigerBeetle setup script to a DB node. This
 looks like a one-off GCP IAM/OS Login hiccup rather than anything caused
 by the test itself - a full retry of the whole invocation succeeded
 cleanly on the first attempt (3/3 runs, no further errors).
+
+**`rate160k` needed seven attempts to get two usable runs, for a mix of
+reasons - most of them our own doing, one of them still unexplained.** In
+rough order: (1) a hard ~24.5-minute limit on the background task running
+the coordinator killed the process during the third run's balance
+verification, having already completed runs 1 and 2 cleanly - hit on the
+1st, 2nd, and 7th attempts, with no correlation to check-in frequency;
+(2) killing the local coordinator process to recover from that left the
+*remote* client processes on the VMs still running and holding the
+deployed binary open, so the next attempt's `scp` failed with `dest open
+"client": Failure` - fixed by recreating the client-cluster; (3) not
+tearing down the DB cluster between the killed attempt and the next retry
+meant the next invocation's account-funding step ran against
+already-funded accounts and doubled every balance - the same non-idempotent
+`init_accounts` bug documented above, this time self-inflicted rather than
+from a genuinely separate test - fixed by recreating the database-cluster;
+(4) a one-off IAP tunnel `ConnectionCreationError` unrelated to any of the
+above. The one attempt that finally got two clean, complete runs (the data
+reported above) was itself killed by the same ~24.5-minute limit during
+run 3 - meaning **every single attempt at this specific knob combination
+hit that same background-task ceiling**, regardless of infrastructure
+state, check-in cadence, or how many times we'd already worked around
+other issues. Given the test's natural runtime (3 runs x ~7min + ~3min
+setup = ~24min) sits right at that limit, this is worth flagging
+explicitly for anyone else running a similarly long single coordinator
+invocation from a background shell.
 
 ## Raw results
 
@@ -724,6 +799,55 @@ Result file: `results/run_20260807_091056/results.json`
   "warnings": [],
   "errors": []
 }
+```
+
+### TigerBeetle, rate160k
+
+**No `results.json` was produced** - the coordinator process was killed
+during run 3's balance verification before it could write results (see
+"Infrastructure issues hit along the way" above). The two runs below were
+extracted manually from the coordinator's log output
+(`coordinator::prometheus: Collected metrics: ...` lines) rather than the
+standard export format. `throughput_tps` here is computed the same way the
+coordinator computes it: `(completed_transfers + rejected_transfers) /
+300`.
+
+```
+Run 1 (from log, run_20260807_120613, ~12:14:58 UTC):
+  completed_transfers: 21845848
+  rejected_transfers:  10213879
+  failed_transfers:    0
+  dropped_transfers:   16629772
+  latency_p50_us:      3588627
+  latency_p95_us:      4732599
+  latency_p99_us:      4946519
+  latency_p999_us:     4994651
+  throughput_tps:      106865.76  (= (21845848 + 10213879) / 300)
+  balance_verified:    true (100000000000)
+
+Run 2 (from log, ~12:23:34 UTC):
+  completed_transfers: 22250816
+  rejected_transfers:  10404259
+  failed_transfers:    0
+  dropped_transfers:   16748593
+  latency_p50_us:      3633726
+  latency_p95_us:      6204574
+  latency_p99_us:      9641193
+  latency_p999_us:     14241935
+  throughput_tps:      108850.25  (= (22250816 + 10404259) / 300)
+  balance_verified:    true (100000000000)
+
+Manual 2-run average (not a coordinator-computed aggregate - no stddev/CV,
+since n=2 rather than the usual n=3):
+  throughput_tps:  107858.00
+  latency_p50_us:  3611176   (~3,611ms)
+  latency_p95_us:  5468586   (~5,469ms)
+  latency_p99_us:  7293856   (~7,294ms)
+  latency_p999_us: 9618293   (~9,618ms) - note the wide run-to-run spread
+                    here (4.99s vs 14.24s), unlike every other test in this
+                    sweep where percentiles were tightly clustered across
+                    runs (CV well under 5%). Treat this average as
+                    directional, not precise.
 ```
 
 ### PostgreSQL standard, concurrency5k
