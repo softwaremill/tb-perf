@@ -1,0 +1,54 @@
+# Cloud TigerBeetle hotspot-contention test configuration - rate sweep,
+# bisecting the gap between config.cloud-tigerbeetle-hotspot-rate80k.toml
+# and config.cloud-tigerbeetle-hotspot-rate160k.toml. rate80k was clean
+# (81,171 TPS, dropped_transfers=0) but showed a dramatic p50 jump (+810%);
+# rate160k was clearly degraded (107,858 TPS, only 67% of offered load,
+# ~34% dropped_transfers). TigerBeetle's real ceiling under this hotspot
+# workload sits somewhere between those two points, so target_rate is set
+# to 120,000 (the midpoint) to narrow it down. max_concurrency raised to
+# 300,000 (60,000/client vs 24,000/client offered - same 2.5x headroom
+# ratio used throughout this sweep) so any real slowdown shows up as
+# latency growth, not an artificial drop from an undersized cap. Requires
+# the widened client/src/metrics.rs histogram buckets (up to 20s), same as
+# rate160k, to get a trustworthy tail-latency reading if this run turns
+# out to be degraded too.
+
+[workload]
+test_mode = "fixed_rate"
+target_rate = 120000  # Total requests/sec across all 5 client instances
+max_concurrency = 300000
+num_accounts = 100000
+zipfian_exponent = 2.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 120
+test_duration_secs = 300
+
+[database]
+type = "tigerbeetle"
+
+[tigerbeetle]
+cluster_addresses = ["tb-node-1:3000", "tb-node-2:3000", "tb-node-3:3000"]
+
+[deployment]
+type = "cloud"
+num_db_nodes = 3
+num_client_nodes = 5
+gcp_project = "tigerbettle-sandbox"
+gcp_region = "europe-central2"
+db_machine_type = "n2-highmem-4"
+client_machine_type = "n2-standard-2"
+measure_network_latency = true
+
+[coordinator]
+test_runs = 3
+max_variance_threshold = 0.10
+max_error_rate = 0.05
+metrics_export_path = "./results"
+keep_grafana_running = true
+
+[monitoring]
+grafana_port = 3000
+prometheus_port = 9090
+otel_collector_port = 4317

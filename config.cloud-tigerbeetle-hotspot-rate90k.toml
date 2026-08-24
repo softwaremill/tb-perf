@@ -1,0 +1,60 @@
+# Cloud TigerBeetle hotspot-contention test configuration - rate sweep,
+# further bisecting the gap below config.cloud-tigerbeetle-hotspot-rate100k.toml.
+# rate80k was clean (81,171 TPS, dropped_transfers=0). rate120k came back
+# clearly degraded (107,112 TPS mean, only ~89% of offered load, ~12%
+# dropped_transfers, p50 latency 2.50s vs rate80k's 664ms) - confirming
+# TigerBeetle's real ceiling under this hotspot workload sits between
+# 80,000 and 120,000, tighter than the original 80k-160k bracket. rate100k
+# was created to bisect that range; this config (90,000) bisects the
+# remaining gap between the known-clean rate80k and rate100k, whichever
+# way rate100k lands. max_concurrency raised to 225,000 (45,000/client vs
+# 18,000/client offered - same 2.5x headroom ratio used throughout this
+# sweep) so any real slowdown shows up as latency growth, not an
+# artificial drop from an undersized cap. Requires the widened
+# client/src/metrics.rs histogram buckets (up to 20s), same as
+# rate120k/rate160k, to get a trustworthy tail-latency reading if this run
+# turns out to be degraded too - though note even those buckets still have
+# an exact boundary at 4,000,000us (4s) where rate120k's p999 showed the
+# same near-zero-variance signature previously identified as a
+# bucket-boundary artifact at 1.5s for rate40k/rate80k; treat p999 here
+# with the same caution if it lands close to a boundary again.
+
+[workload]
+test_mode = "fixed_rate"
+target_rate = 90000  # Total requests/sec across all 5 client instances
+max_concurrency = 225000
+num_accounts = 100000
+zipfian_exponent = 2.0
+initial_balance = 1000000
+min_transfer_amount = 1
+max_transfer_amount = 1000
+warmup_duration_secs = 120
+test_duration_secs = 300
+
+[database]
+type = "tigerbeetle"
+
+[tigerbeetle]
+cluster_addresses = ["tb-node-1:3000", "tb-node-2:3000", "tb-node-3:3000"]
+
+[deployment]
+type = "cloud"
+num_db_nodes = 3
+num_client_nodes = 5
+gcp_project = "tigerbettle-sandbox"
+gcp_region = "europe-central2"
+db_machine_type = "n2-highmem-4"
+client_machine_type = "n2-standard-2"
+measure_network_latency = true
+
+[coordinator]
+test_runs = 3
+max_variance_threshold = 0.10
+max_error_rate = 0.05
+metrics_export_path = "./results"
+keep_grafana_running = true
+
+[monitoring]
+grafana_port = 3000
+prometheus_port = 9090
+otel_collector_port = 4317

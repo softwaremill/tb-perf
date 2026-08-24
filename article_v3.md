@@ -168,12 +168,12 @@ exponent, resulting in "hotspot" accounts:
 ### Heavy hotspot skew (Zipfian s = 2.0) - corrected knobs
 
 This is where it gets interesting - and where the gap widens considerably
-compared to our first pass at this test. We ran six variants, doubling the
+compared to our first pass at this test. We ran nine variants, doubling the
 offered load each time and raising `max_concurrency` generously alongside
 it (it's a pure client-side safety valve with no corresponding server-side
 resource limit, unlike PostgreSQL's connection pool, so there's no cost to
-overprovisioning it) - until the last one, where the doubling finally
-found a real wall:
+overprovisioning it), then bisected downward three more times once the
+doubling found a real wall, to pin down exactly where it sits:
 
 | Variant | target_rate | max_concurrency |
 |---|---|---|
@@ -182,6 +182,9 @@ found a real wall:
 | `rate20k` (TigerBeetle only) | 20,000 | 30,000 |
 | `rate40k` (TigerBeetle only) | 40,000 | 100,000 |
 | `rate80k` (TigerBeetle only) | 80,000 | 200,000 |
+| `rate90k` (TigerBeetle only) | 90,000 | 225,000 |
+| `rate100k` (TigerBeetle only) | 100,000 | 250,000 |
+| `rate120k` (TigerBeetle only) | 120,000 | 300,000 |
 | `rate160k` (TigerBeetle only) | 160,000 | 400,000 |
 
 | Metric | TigerBeetle | PostgreSQL Standard | PostgreSQL Atomic |
@@ -201,6 +204,15 @@ found a real wall:
 | **`rate80k`** |
 | Mean throughput | **81,171 TPS** | not tested | not tested |
 | Dropped requests | **0** | - | - |
+| **`rate90k`** |
+| Mean throughput | **91,165 TPS** | not tested | not tested |
+| Dropped requests | **0** | - | - |
+| **`rate100k`** |
+| Mean throughput | **101,497 TPS** | not tested | not tested |
+| Dropped requests | **0** | - | - |
+| **`rate120k`** |
+| Mean throughput | **107,112 TPS - only 89% of offered** | not tested | not tested |
+| Dropped requests | **~12%** of offered load | - | - |
 | **`rate160k`** |
 | Mean throughput | **107,858 TPS - only 67% of offered** | not tested | not tested |
 | Dropped requests | **~34%** of offered load | - | - |
@@ -215,6 +227,18 @@ its throughput doesn't move with `target_rate` (see "What we tried on
 PostgreSQL's side" below) - we spent the later rounds pinning down
 TigerBeetle's ceiling instead.
 
+`rate90k` and `rate100k` both came back completely clean - zero dropped
+requests, throughput matching the offered rate almost exactly (101%
+at both), the same pattern as `rate20k` through `rate80k`. `rate120k` is
+where that pattern finally breaks: throughput fell to 89% of offered and
+`dropped_transfers` turned sharply positive (~12% of offered load) - a
+real, repeatable shortfall (throughput coefficient of variation across its
+3 runs was 0.78%, and the drop rate landed within a point of itself on
+every run), not noise. That narrows TigerBeetle's real ceiling under this
+workload considerably: **it sits somewhere between 100,000 and 120,000 TPS
+offered** - tighter than the 80,000-160,000 bracket we could only
+establish before these three follow-up runs.
+
 ![TigerBeetle vs PostgreSQL throughput, corrected hotspot knobs](article-assets/throughput_corrected_hotspot.png)
 
 A note on latency, and a genuine measurement gap worth being upfront about:
@@ -224,20 +248,50 @@ bounded at 5 seconds. That means we know real PostgreSQL latency at this
 load is **at least** 5 seconds at every percentile including the median,
 but we don't have a precise number beyond "at least 5s." TigerBeetle's own
 latency stayed real and informative for most of this sweep, but not all of
-it - the same histogram also had a bucket boundary at exactly 1.5 seconds,
-and at `rate40k` and especially `rate80k`, TigerBeetle's p99 and p999
-started landing right against that boundary too (with near-zero run-to-run
-variance, the signature of a value being capped by the measurement rather
-than converging naturally). Rather than leave that ambiguous, we widened
-the histogram's buckets up to 20 seconds before running `rate160k` -
-specifically so that test could tell a real architectural cap apart from a
-measurement artifact. It settled the question: `rate160k`'s latency grew
-freely to several seconds, well past the old 1.5s boundary, confirming
-that `rate40k`/`rate80k`'s plateau there really had been an artifact of
-insufficient bucket resolution, not a genuine ceiling. The chart below
-marks the artifact-affected bars with a hatch pattern - treat those
-specific values as "at least this much," not a precise reading. Every
-other bar, including all of `rate160k`'s, is a real measured value:
+it - though in a milder way, and in the *opposite* direction, which is
+worth separating out carefully because we conflated the two at first.
+
+The histogram also has a bucket boundary at 1.5 seconds, and at `rate40k`,
+`rate80k`, and `rate90k` TigerBeetle's p99 and p999 landed just *below* it
+(1,481ms, 1,458ms, 1,496ms) with near-zero run-to-run variance. That is the
+signature of a percentile being quantised by a coarse bucket rather than
+converging naturally - the step from 1.0s to 1.5s is a 50% jump, wide
+relative to the rest of the ladder.
+
+But this is not the same failure as PostgreSQL's, and the difference decides
+which way the uncertainty runs. We derive percentiles with Prometheus
+`histogram_quantile`, which returns the highest finite boundary *exactly*
+when the quantile falls into the overflow bucket, but interpolates *inside*
+a finite bucket otherwise. PostgreSQL's numbers are exactly 5,000,000us -
+the overflow case, a true lower bound. TigerBeetle's sit strictly inside a
+finite bucket, and the buckets at 2s, 3s and 5s already existed and stayed
+empty; had the real tail exceeded 1.5s, they would have caught it. So
+TigerBeetle's affected numbers are **upper** bounds: the true p99/p999 is
+somewhere in 1.0-1.5s. We lack precision within a 500ms window, not
+knowledge of whether the tail is secretly seconds long.
+
+`rate100k` is the interesting exception: its p999 sits close to that same
+1.5s boundary but with far higher run-to-run variance (5.8% vs. under 0.1%
+for every quantised bar) - two of its three runs actually landed in the
+next bucket up, a sign that the real tail latency was already starting to
+break free of the boundary here, just not consistently enough across all 3
+runs to report as a single trustworthy number. Rather than leave any of
+this ambiguous, we widened the histogram up to 20 seconds before running
+`rate120k` and `rate160k`, and added intermediate boundaries at 1.75s, 2.5s
+and 4s so the 1-5s region stopped being so coarse - specifically so those
+tests could tell a real architectural cap apart from a resolution
+artifact. That mostly settled
+the question - except the widened ladder introduced a boundary at 4 seconds,
+and `rate120k`'s p999 landed just under *that* one instead (3,982-3,986ms,
+again with near-zero run-to-run variance), the same quantisation recurring
+one boundary further out and again bounding from above. `rate160k`'s
+latency, finally, grew freely to several seconds without piling up at any
+remaining boundary, confirming that every earlier plateau really had been a
+resolution artifact, not a genuine ceiling. The chart below marks every
+affected bar with a hatch pattern - read those as "no more than this, and
+somewhere inside the bucket below," not as precise values. (PostgreSQL's 5s
+bars are the other kind of caveat, and the only "at least this much" ones.)
+Every other bar, including all of `rate160k`'s, is a real measured value:
 
 ![TigerBeetle latency across the full knob sweep](article-assets/latency_tigerbeetle_corrected_hotspot.png)
 
@@ -266,25 +320,30 @@ that window. Full detail in `hotspot-knob-sweep-results.md`.*
   investigation (878 TPS), TigerBeetle's `rate160k` result (107,858 TPS) is
   **~123x** higher, though that comparison isn't apples-to-apples since we
   didn't re-test PostgreSQL at that offered rate.
-- **We found TigerBeetle's real ceiling - and it's between 80,000 and
-  160,000 TPS offered, under this specific hotspot workload.** Throughput
-  tracked the offered rate almost exactly through `rate20k`, `rate40k`, and
-  `rate80k` (`dropped_transfers` was zero at all three) - by that metric
-  alone, nothing looked wrong yet. But median (p50) latency at `rate80k`
-  had already jumped from 73ms to 664ms (a 9x increase, dwarfing every
-  earlier doubling), which we read at the time as the first sign of real
-  saturation. `rate160k` confirmed it decisively: mean throughput fell to
-  **107,858 TPS - only 67% of the 160,000 offered** - the first genuine
-  throughput shortfall anywhere in this sweep, with roughly a third of
-  offered load dropped and latency growing to multiple seconds (p50 ~3.6s,
+- **We found TigerBeetle's real ceiling - and narrowed it down to between
+  100,000 and 120,000 TPS offered, under this specific hotspot workload.**
+  Throughput tracked the offered rate almost exactly through `rate20k`,
+  `rate40k`, `rate80k`, `rate90k`, and `rate100k` (`dropped_transfers` was
+  zero at all five) - by that metric alone, nothing looked wrong yet. But
+  median (p50) latency at `rate80k` had already jumped from 73ms to 664ms
+  (a 9x increase, dwarfing every earlier doubling), which we read at the
+  time as the first sign of real saturation. `rate120k` confirmed it:
+  mean throughput fell to **107,112 TPS - only 89% of the 120,000
+  offered**, with ~12% of offered load dropped and p50 latency jumping
+  again to 2.5s (up from 797ms at `rate100k`) - the first genuine
+  throughput shortfall in the sweep. `rate160k` pushed further past that
+  same wall: **107,858 TPS - only 67% of offered**, roughly a third of
+  offered load dropped, latency growing to multiple seconds (p50 ~3.6s,
   p999 up to 14.2s). `rate80k`'s dramatic latency growth was a correctly
-  read warning sign; it just wasn't the wall itself - `rate160k` is.
+  read warning sign; it just wasn't the wall itself - somewhere between
+  `rate100k` and `rate120k` is.
 - **The corrected numbers are more trustworthy, not just bigger.** Our
   original hotspot numbers for TigerBeetle were an artifact of an
   unmeasured concurrency cap, not TigerBeetle's real capacity. Once we
   tracked `dropped_transfers` and raised the cap, TigerBeetle's own ceiling
   turned out to be *far higher* than we'd been reporting - high enough that
-  it took five further doublings of offered load to actually find it.
+  it took eight further steps of progressively higher (and then more
+  finely bisected) offered load to actually find it.
 - **PostgreSQL's ceiling under hotspot skew is architectural, not a tuning
   gap.** We tried raising `max_concurrency`, raising `target_rate`, and
   separately raising `connection_pool_size` (see below) - none of them
@@ -321,19 +380,22 @@ and along the way, tightened up our own measurement methodology enough to
 find that we'd been under-reporting TigerBeetle's actual advantage by a
 wide margin. The differences remain clear: TigerBeetle's lower latency,
 higher throughput, and consistent behavior under contention, against a
-PostgreSQL ceiling that several different tuning knobs all failed to move - and against a TigerBeetle ceiling that took five rounds of progressively
-higher load to even start to find.
+PostgreSQL ceiling that several different tuning knobs all failed to move - and against a TigerBeetle ceiling that took eight rounds of progressively
+higher, then progressively bisected, load to pin down to a 100,000-120,000
+TPS range.
 
 ### What's next
 
 A few natural follow-ups we haven't run yet: re-testing moderate skew with
 the corrected concurrency knobs (we'd expect a similar, if smaller, upward
-correction for TigerBeetle there); getting a clean, full 3-run `rate160k`
-result (or a `rate120k` in between, to narrow down where between 80,000
-and 160,000 the real wall sits more precisely) once we've worked around
-the background-task limit that cost us a third run this time; and testing
-`synchronous_commit` levels for PostgreSQL, since each row lock is
-currently held for the duration of a full cross-zone replication round
-trip - shrinking that hold time is the one lever in this whole
-investigation that would directly target the mechanism we now believe is
-the actual bottleneck for PostgreSQL specifically.
+correction for TigerBeetle there); narrowing the 100,000-120,000 TPS
+ceiling bracket further with one or two more bisecting runs (e.g.
+`rate105k`/`rate110k`) now that we know roughly where to look, and getting
+a clean, full 3-run `rate160k` result to replace the 2-run average we're
+currently reporting, once we've worked around the background-task limit
+that cost us a third run there; and testing `synchronous_commit` levels
+for PostgreSQL, since each row lock is currently held for the duration of
+a full cross-zone replication round trip - shrinking that hold time is the
+one lever in this whole investigation that would directly target the
+mechanism we now believe is the actual bottleneck for PostgreSQL
+specifically.
