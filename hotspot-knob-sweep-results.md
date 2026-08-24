@@ -60,13 +60,14 @@ Moderate skew (`zipfian_exponent = 1.0`) was not run this round.
 | p50 / p95 / p99 latency | **3,611** / **5,469** / **7,294** ms (real values, no longer bucket-capped) | - | - |
 | Dropped | **~34%** of offered load (16.6-16.7M/run) | - | - |
 
-\* p99 and p999 at `rate80k` (and p999 at `rate40k`) sat right against the
-histogram's old 1.5s bucket boundary - confirmed a measurement artifact,
-not a real value, once `rate160k` proved latency grows freely well past
-1.5s when the histogram has room. See below for the full story and an
-important caveat on the `rate160k` numbers themselves (2 of 3 runs, due to
-an infrastructure issue - not a data-quality problem, but worth reading
-before citing these numbers).
+\* p99 and p999 at `rate80k` (and p999 at `rate40k`) sat just below the
+histogram's 1.5s bucket boundary - a resolution artifact, so treat them as
+**upper** bounds (the true value is somewhere in 1.0-1.5s) rather than
+precise readings. Note this is the *opposite* direction to PostgreSQL's 5s
+numbers, which are lower bounds; see "Two different kinds of histogram
+problem" below. See also an important caveat on the `rate160k` numbers
+themselves (2 of 3 runs, due to an infrastructure issue - not a
+data-quality problem, but worth reading before citing these numbers).
 
 Balance verified 3/3 runs in every test through `rate80k`, and 2/2 runs
 that completed for `rate160k` (see caveat below) - no correctness issues
@@ -123,21 +124,53 @@ Latency growth per doubling, by percentile:
 
 \* **Correction:** the original version of this doc read the flattening
 p999 growth at `rate40k` (+2%) as "bumping against a separate, roughly
-fixed tail ceiling." That interpretation was wrong. `client/src/metrics.rs`
-bounds the exported latency histogram's buckets up to `1,500,000us` (1.5s)
-as its second-highest boundary - and both `rate40k`'s p999 (1,481ms) and
-`rate80k`'s p999 (1,496ms), plus now `rate80k`'s p99 too (1,458ms), are
-sitting within a few milliseconds of that exact boundary. Worse, the
-run-to-run coefficient of variation on `rate80k`'s p99/p999 is
-essentially zero (0.03% and 0.008% - all three runs landing within a few
-hundred *microseconds* of each other), which is the signature of a
-value being capped by a bucket edge, not organically converging. **We
-don't have a trustworthy number for real tail latency beyond ~1.5s at
-either `rate40k` or `rate80k`** - it could be exactly what's shown, or it
-could be much worse; the histogram simply can't tell us. This is the same
-category of measurement gap as PostgreSQL's 5-second histogram cap found
-earlier in this sweep, just less obvious since 1.5s isn't a suspiciously
-round number the way 5,000ms is.
+fixed tail ceiling." That interpretation was wrong - and so was our first
+attempt at correcting it, which over-corrected in the other direction. The
+accurate version:
+
+`client/src/metrics.rs` has a bucket boundary at `1_500_000us` (1.5s), and
+both `rate40k`'s p999 (1,481ms) and `rate80k`'s p999 (1,496ms), plus
+`rate80k`'s p99 (1,458ms), sit within a few milliseconds *below* it. The
+run-to-run coefficient of variation on `rate80k`'s p99/p999 is essentially
+zero (0.03% and 0.008% - all three runs landing within a few hundred
+*microseconds* of each other), which is the signature of a percentile being
+quantised by a coarse bucket rather than organically converging. The step
+from 1.0s to 1.5s is a 50% jump, wide relative to the rest of the ladder.
+
+### Two different kinds of histogram problem
+
+The earlier version of this section claimed the 1.5s effect was "the same
+category of measurement gap as PostgreSQL's 5-second histogram cap." **It
+isn't - it's the opposite, and the distinction matters because it changes
+which direction the uncertainty runs.** The coordinator derives percentiles
+with Prometheus `histogram_quantile` (`coordinator/src/prometheus.rs:151`),
+which behaves in two distinct ways:
+
+- **Quantile falls in the `+Inf` overflow bucket** -> it returns the highest
+  finite boundary, *exactly*. PostgreSQL's numbers are exactly
+  `5000000`us at every percentile and every run. That is a genuine **lower**
+  bound: at least 5s, and it could be anything above that.
+- **Quantile falls in a finite bucket** -> it interpolates linearly *inside*
+  that bucket, producing a value strictly below the bucket's top edge.
+  TigerBeetle's 1,481 / 1,458 / 1,496ms are this case.
+
+That second case is far more benign than we first wrote, because buckets at
+2s, 3s and 5s **already existed and stayed empty** (the commit that later
+widened the ladder says exactly this: "buckets did already exist at
+2M/3M/5M above that point and weren't being used"). Had the real tail
+exceeded 1.5s, those buckets would have caught it and the estimate would
+have moved. It didn't.
+
+So: **`rate40k`'s and `rate80k`'s tail latencies are bounded above by
+1.5s.** The true p99/p999 sits somewhere in (1.0s, 1.5s] - imprecise, but
+constrained on the *good* side. The earlier claim that "it could be exactly
+what's shown, or it could be much worse" was wrong: it cannot be much
+worse. What we lack is precision within a 500ms window, not knowledge of
+whether the tail is secretly seconds long.
+
+For the record, 1.5s was also not "the second-highest boundary" as an
+earlier revision stated - even before the widening, the ladder ran
+1.5s, 2s, 3s, 5s, making 1.5s the fourth-highest.
 
 The trustworthy signal is p50 and p95, since neither sits anywhere near a
 bucket boundary at any step. And on the `rate40k -> rate80k` step, that
@@ -153,8 +186,10 @@ would just repeat the same measurement problem at a new boundary.
 
 **We were wrong about `rate80k` being the ceiling - it wasn't, and here's
 the proof.** Before pushing further, we widened `client/src/metrics.rs`'s
-histogram buckets from a 1.5s max up to 20s, specifically so the next test
-could tell a real architectural cap apart from a bucket-boundary artifact.
+histogram from a 5s max up to 20s, and added intermediate boundaries at
+1.75s, 2.5s and 4s so the 1.0-5.0s region stopped being so coarse -
+specifically so the next test could tell a real architectural cap apart
+from a bucket-resolution artifact.
 Then we ran `rate160k`: target_rate doubled again to 160,000,
 `max_concurrency` raised to 400,000 (same 2.5x headroom ratio used
 throughout). The result settled the question decisively:
@@ -171,12 +206,14 @@ throughout). The result settled the question decisively:
   available up to 20s, these are genuine measured values, not artifacts.
 
 That last point is the key methodological payoff: **latency at `rate160k`
-grew freely to multiple seconds once the histogram had room to show it.**
-If `rate40k`/`rate80k`'s ~1.5s plateau had been a real architectural
-ceiling, `rate160k`'s numbers would have plateaued at roughly the same
-point too, just with a different (higher) bucket boundary in the way. They
-didn't - they kept climbing well past 1.5s, confirming the earlier
-plateau really was the histogram artifact we suspected, not a genuine cap.
+grew freely to multiple seconds once the histogram had the resolution to
+show it.** If `rate40k`/`rate80k`'s ~1.5s plateau had been a real
+architectural ceiling, `rate160k`'s numbers would have plateaued at roughly
+the same point too. They didn't - they kept climbing well past 1.5s,
+confirming the earlier plateau was a bucket-resolution artifact, not a
+genuine cap. (`rate120k`'s p999 then did the same thing one boundary
+further out, landing at 3,982-3,986ms just under the newly-added 4s
+boundary - again an upper bound, not a ceiling.)
 TigerBeetle's actual ceiling under this hotspot workload sits somewhere
 between `rate80k` (clean: 0 drops, 664ms p50) and `rate160k` (degraded:
 ~34% drops, 3.6s+ p50) - `rate80k`'s dramatic p50 growth (+810%) was a
